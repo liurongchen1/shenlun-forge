@@ -5,3 +5,5 @@ build/
 *.tar.gz
 *.whl
 .pytest_cache/
+venv/
+experiments

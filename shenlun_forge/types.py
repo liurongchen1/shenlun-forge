@@ -64,6 +64,9 @@ class TaskProfile:
     output_format: str = "sequential"  # sequential / structured / bullet
     token_budget: int = 4000
     priority_rules: dict[str, float] = field(default_factory=dict)  # 各要素权重
+    # v0.3 P0: 分类维度与输出逻辑（供 Retriever/Formatter 使用）
+    classification_dimension: str = "auto"  # auto / temporal / spatial / causal / layer / element
+    output_logic: str = "auto"  # auto / parallel / causal / progressive / temporal
 
 
 @dataclass

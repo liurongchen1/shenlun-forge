@@ -39,8 +39,14 @@ Respond in JSON:
 Rules:
 - Each block index must appear in exactly one group
 - Summary labels should be concise (2-6 chars) and descriptive
-- Merged content should preserve all critical information while being more concise
 - Normalize colloquial language to technical/formal expressions
+
+CRITICAL — DO NOT abstract away the following during merging:
+1. Task items and deadlines: specific TODOs, pending tasks, deadlines (dates, durations like "3 days"), milestones. These are operational facts — losing them means the user forgets what to do and when.
+2. Code-level details: function names, variable names, class names, API endpoints, file paths, configuration keys. These are implementation facts — summarizing "verify_password uses bcrypt" to "authentication is implemented" destroys the information.
+3. Specific numbers and identifiers: version numbers, port numbers, error codes, enum values, constant names.
+
+Instead of summarizing these into abstract descriptions, PRESERVE them verbatim in merged_content. You may restructure the surrounding text, but concrete identifiers and task specifics must appear in the output exactly as they appear in the input.
 """
 
 NORMALIZE_MAP = {
@@ -76,10 +82,14 @@ class ACSProcessor(BaseProcessor):
         blocks: list[ContextBlock],
         task_profile: TaskProfile,
     ) -> list[CompressedBlock]:
-        """Process blocks: merge similar, add labels, normalize."""
+        """Process blocks: merge similar, add labels, normalize, preserve entities."""
 
         if not blocks:
             return []
+
+        # Step 3-pre: Extract key entities from original content for preservation
+        original_text = "\n".join(b.content for b in blocks)
+        key_entities = self._extract_entities(original_text)
 
         # Step 3a: Merge similar content (合并同类项)
         if self.enable_merge:
@@ -118,6 +128,10 @@ class ACSProcessor(BaseProcessor):
 
         # Sort by original first index to maintain flow
         compressed.sort(key=lambda x: x.original_indices[0] if x.original_indices else 0)
+
+        # Step 3-post: Preserve key entities — inject missing ones
+        if key_entities and compressed:
+            compressed = self._preserve_entities(compressed, key_entities)
 
         return compressed
 
@@ -278,3 +292,151 @@ class ACSProcessor(BaseProcessor):
             )
 
         return normalized
+
+    # ─── Entity Preservation (关键实体保护) ──────────────────────────────────
+
+    def _extract_entities(self, text: str) -> list[str]:
+        """Extract key entities that must survive compression.
+
+        Targets: code identifiers, constants, API paths, technical terms,
+        version numbers, time expressions, filenames.
+        Returns deduplicated list.
+        """
+        entities = set()
+
+        # 1. snake_case identifiers (2+ chars per segment): is_active, check_deadlines
+        for m in re.finditer(r'\b([a-z]{2,}(?:_[a-z]{2,})+)\b', text):
+            entities.add(m.group(1))
+
+        # 2. SCREAMING_SNAKE_CASE constants: JWT_SECRET, HS256
+        for m in re.finditer(r'\b([A-Z][A-Z0-9]{1,}(?:_[A-Z][A-Z0-9]+)+)\b', text):
+            entities.add(m.group(1))
+
+        # 3. API routes / file paths: /payments/webhook
+        for m in re.finditer(r'(/[a-z][a-z0-9_-]*/[a-z][a-z0-9_/-]*)', text):
+            entities.add(m.group(1).rstrip('/'))
+
+        # 4. Technical terms: all-uppercase 2+ chars (JWT, API, R2, HS256)
+        for m in re.finditer(r'\b([A-Z][A-Z0-9]{1,})\b', text):
+            entities.add(m.group(1))
+
+        # 5. CamelCase (lowercase start): nextAuthService
+        for m in re.finditer(r'\b([a-z]+[A-Z][a-zA-Z]{2,})\b', text):
+            entities.add(m.group(1))
+
+        # 5b. PascalCase (2+ capitalized words joined): SignatureVerificationError
+        for m in re.finditer(r'\b((?:[A-Z][a-z]+){2,})\b', text):
+            entities.add(m.group(1))
+
+        # 6. Product names with dot: Next.js, shadcn/ui
+        for m in re.finditer(r'\b([A-Z][a-z]+\.[a-z]+)\b', text):
+            entities.add(m.group(1))
+
+        # 7. Time expressions: 9:00, 9:00 AM
+        for m in re.finditer(r'\b(\d{1,2}:\d{2}(?:\s*[APap][Mm])?)\b', text):
+            entities.add(m.group(1))
+
+        # 8. Number + unit: 3 days, 50MB, 8 characters
+        for m in re.finditer(r'\b(\d+\s*(?:days?|hours?|minutes?|seconds?|weeks?|months?|years?|MB|KB|GB|chars?|tokens?|items?|files?))\b', text):
+            entities.add(m.group(1))
+
+        # 9. Version numbers: v0.2.2, 2.0.0
+        for m in re.finditer(r'\b(v?\d+\.\d+(?:\.\d+)?)\b', text):
+            entities.add(m.group(1))
+
+        # 10. Filenames with extension: .py, .ts, .json
+        for m in re.finditer(r'\b([a-z_][a-z0-9_]*\.(?:py|ts|tsx|js|jsx|json|md|sql|ini|yml|yaml|env))\b', text):
+            entities.add(m.group(1))
+
+        # ── Chinese-specific patterns ──
+
+        # 11. Number + Chinese unit: 3天, 5个模块, 200行, 第3步
+        for m in re.finditer(r'(\d+\s*(?:天|日|个|步|项|条|次|遍|周|月|年|小时|分钟|秒|块|份|页|行|位|层|级|段|组|批|种))', text):
+            entities.add(m.group(1))
+
+        # 12. Quoted content (Chinese quotes): "认证机制", 「用户模块」, 【已完成】
+        for m in re.finditer(r'[""「」『』（）\u300c\u300d\u300e\u300f]([^""「」『』\u300c\u300d\u300e\u300f]{2,20})[""「」『』\u300c\u300d\u300e\u300f]', text):
+            inner = m.group(1).strip()
+            if len(inner) >= 2 and not all(c in ' \t\n' for c in inner):
+                entities.add(inner)
+        # Square bracket labels: 【关键术语】
+        for m in re.finditer(r'【([^】]{2,20})】', text):
+            entities.add(m.group(1))
+
+        # 13. Chinese ordinal/phase: 第一步, 第二阶段
+        for m in re.finditer(r'([第][一二三四五六七八九十\d]+[步阶段部分层级轮期条项]{1,2})', text):
+            entities.add(m.group(1))
+
+        # 14. Mixed Chinese-English tech terms: JWT认证, API接口, OAuth授权
+        # Require at least one CJK char in trailing part to avoid false matches on English text
+        for m in re.finditer(r'([A-Z][A-Za-z0-9+#.-]{1,}\s*[\u4e00-\u9fff][^\W\d_和的了是在用与及等为也要把被]{0,2})', text):
+            entities.add(m.group(1).strip())
+
+        # 15. Chinese domain-specific keywords (standalone tech terms)
+        for m in re.finditer(r'((?:消息队列|负载均衡|配置中心|微服务|数据库|中间件|认证机制|鉴权机制|加密算法|签名验证|序列化|反序列化|容器编排|网关路由|缓存策略|监控告警|日志采集|消息通知|权限管理|数据备份|故障恢复|灰度发布|持续集成))', text):
+            entities.add(m.group(1))
+
+        # Filter: remove entities that are too short or look like common words
+        filtered = set()
+        stop_words = {
+            'THE', 'AND', 'FOR', 'WITH', 'FROM', 'THIS', 'THAT', 'ARE', 'WAS',
+            'NOT', 'BUT', 'HAS', 'HAD', 'HAV', 'HIS', 'HER', 'ITS', 'OUR',
+            'CAN', 'WILL', 'SHALL', 'WHICH', 'THEIR', 'THEY', 'THEM', 'THEN',
+            'THAN', 'INTO', 'ABOUT', 'AFTER', 'ALL', 'ANY', 'BEEN', 'BEFORE',
+            'BETWEEN', 'EACH', 'EVERY', 'GET', 'GOT', 'HERE', 'HOW', 'JUST',
+            'LIKE', 'MAY', 'MUCH', 'NOW', 'ONLY', 'OTHER', 'OVER', 'SOME',
+            'SUCH', 'THAT', 'THESE', 'WHAT', 'WHEN', 'WHERE', 'WHILE', 'YES',
+            'JSON', 'HTTP', 'HTML', 'CSS', 'SQL', 'URL', 'API', 'URI',
+        }
+        for e in entities:
+            if e.upper() in stop_words:
+                continue
+            if len(e) < 3 and not e.replace('.', '').replace(':', '').isdigit():
+                continue
+            filtered.add(e)
+
+        return list(filtered)
+
+    def _preserve_entities(
+        self,
+        compressed: list[CompressedBlock],
+        entities: list[str],
+    ) -> list[CompressedBlock]:
+        """Ensure key entities appear in compressed output.
+
+        Collects all compressed text, finds missing entities,
+        and appends them as a preservation block.
+        """
+        full_text = "\n".join(b.content for b in compressed)
+
+        missing = [e for e in entities if e not in full_text]
+
+        if not missing or len(missing) <= len(entities) * 0.3:
+            # Most entities preserved (>=70%), no need to inject
+            return compressed
+
+        # Sort missing by length (longer = more specific, higher priority)
+        missing.sort(key=len, reverse=True)
+
+        # Cap at 30 entities to avoid bloating
+        missing = missing[:30]
+
+        preservation_text = "\n[关键术语保留] " + ", ".join(missing)
+
+        # Add as a new block at the end
+        last_idx = max(
+            (i for block in compressed for i in block.original_indices),
+            default=0,
+        )
+        preserved_tokens = count_tokens(preservation_text)
+
+        compressed.append(CompressedBlock(
+            content=preservation_text,
+            original_indices=[last_idx],
+            summary_label="关键术语",
+            info_type=InfoType.FACT,
+            preserved_token_count=preserved_tokens,
+            compression_ratio=1.0,
+        ))
+
+        return compressed

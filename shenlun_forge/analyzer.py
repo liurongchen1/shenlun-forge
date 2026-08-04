@@ -11,6 +11,56 @@ from .base import BaseAnalyzer
 from .types import ContextBlock, TaskProfile, TaskType
 
 
+# v0.3 P1: 分类维度关键词（Signal 2: query → classification_dimension）
+DIMENSION_KEYWORDS = {
+    "temporal": ["流程", "步骤", "阶段", "时间线", "顺序", "历史", "发展", "演进",
+                 "process", "step", "stage", "timeline", "sequence", "history", "evolution",
+                 "计划", "排期", "milestone", "阶段"],
+    "causal": ["原因", "因果", "为什么", "导致", "根源", "归因", "影响",
+               "cause", "reason", "why", "lead to", "root cause", "attribution"],
+    "layer": ["架构", "层次", "分层", "模块", "组件", "结构", "系统",
+              "architecture", "layer", "module", "component", "structure", "system"],
+    "spatial": ["区域", "分布", "位置", "范围", "领域", "地理",
+                "region", "distribution", "location", "scope", "domain", "geographic"],
+    "element": ["要素", "维度", "方面", "因素", "属性", "特征",
+                "element", "dimension", "aspect", "factor", "attribute", "feature"],
+}
+
+# v0.3 P1: 输出逻辑关键词（query → output_logic）
+OUTPUT_LOGIC_KEYWORDS = {
+    "temporal": ["按时间", "时间线", "先后", "顺序", " chronological", "按阶段", "演进"],
+    "causal": ["原因", "因果", "归因", "为什么", "分析原因", "causal", "attribution"],
+    "progressive": ["递进", "深入", "逐步", "层层", "progressive", "step by step", "渐进"],
+    "parallel": ["并列", "对比", "比较", "同时", "parallel", "compare", "side by side", "分别"],
+}
+
+
+def _detect_dimension(query: str) -> str:
+    """v0.3 P1: 根据 query 关键词检测分类维度。"""
+    query_lower = query.lower()
+    scores = {}
+    for dim, keywords in DIMENSION_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in query_lower)
+        if score > 0:
+            scores[dim] = score
+    if scores:
+        return max(scores, key=scores.get)
+    return "auto"
+
+
+def _detect_output_logic(query: str) -> str:
+    """v0.3 P1: 根据 query 关键词检测输出逻辑。"""
+    query_lower = query.lower()
+    scores = {}
+    for logic, keywords in OUTPUT_LOGIC_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in query_lower)
+        if score > 0:
+            scores[logic] = score
+    if scores:
+        return max(scores, key=scores.get)
+    return "auto"
+
+
 ANALYZE_PROMPT = """You are a task analysis engine. Given a conversation history and the current user query, determine:
 
 1. **task_type**: What kind of task is this? One of:
@@ -39,6 +89,21 @@ ANALYZE_PROMPT = """You are a task analysis engine. Given a conversation history
    - "structured": Group by topic/category
    - "bullet": Key points as bullet list
 
+5. **classification_dimension**: What is the primary organizing dimension?
+   - "auto": No clear dimension
+   - "temporal": Time/process/stage sequence
+   - "causal": Cause-effect relationships
+   - "layer": Architectural/structural layers
+   - "spatial": Geographic/domain distribution
+   - "element": Attributes/factors/aspects
+
+6. **output_logic**: How should the output flow logically?
+   - "auto": No clear logic preference
+   - "parallel": Side-by-side comparison
+   - "causal": Cause → effect chain
+   - "progressive": Step-by-step deepening
+   - "temporal": Chronological order
+
 Current query: {query}
 
 Conversation history (last {n} messages):
@@ -57,7 +122,9 @@ Respond in JSON format:
     "duplicated_info": 0.0,
     "code_snippets": 0.0
   }},
-  "output_format": "..."
+  "output_format": "...",
+  "classification_dimension": "...",
+  "output_logic": "..."
 }}"""
 
 
@@ -205,12 +272,17 @@ class ACSAnalyzer(BaseAnalyzer):
         key_elements = result.get("key_elements", [])
         priority_rules = result.get("priority_rules", DEFAULT_PRIORITIES[task_type])
         output_format = result.get("output_format", "sequential")
+        # v0.3 P1: 解析分类维度和输出逻辑
+        classification_dimension = result.get("classification_dimension", "auto")
+        output_logic = result.get("output_logic", "auto")
 
         return TaskProfile(
             task_type=task_type,
             key_elements=key_elements,
             output_format=output_format,
             priority_rules=priority_rules,
+            classification_dimension=classification_dimension,
+            output_logic=output_logic,
         )
 
     def _rule_based_analyze(
@@ -242,11 +314,17 @@ class ACSAnalyzer(BaseAnalyzer):
             TaskType.CONVERSATION: "sequential",
         }
 
+        # v0.3 P1: 规则路径也走分类维度/输出逻辑检测
+        classification_dimension = _detect_dimension(current_query)
+        output_logic = _detect_output_logic(current_query)
+
         return TaskProfile(
             task_type=task_type,
             key_elements=self._extract_key_elements_heuristic(messages, current_query),
             output_format=format_map.get(task_type, "sequential"),
             priority_rules=DEFAULT_PRIORITIES.get(task_type, DEFAULT_PRIORITIES[TaskType.CONVERSATION]),
+            classification_dimension=classification_dimension,
+            output_logic=output_logic,
         )
 
     def _extract_key_elements_heuristic(
