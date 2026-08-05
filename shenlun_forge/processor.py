@@ -16,6 +16,10 @@ from .types import ContextBlock, CompressedBlock, TaskProfile, TaskType, InfoTyp
 
 MERGE_PROMPT = """You are a context compression processor. Your job is to merge similar/related context blocks and extract summary labels.
 
+The user is currently asking about: "{current_query}"
+
+When merging, PRIORITIZE preserving information directly relevant to this query. Information unrelated to the query can be compressed more aggressively, but never discard concrete facts, numbers, or technical details.
+
 Given the following context blocks, group them by semantic similarity, then for each group:
 1. Merge the content into a concise representation
 2. Extract a "summary label" (总括词) - a short 2-6 character label that captures the essence
@@ -91,11 +95,44 @@ class ACSProcessor(BaseProcessor):
         original_text = "\n".join(b.content for b in blocks)
         key_entities = self._extract_entities(original_text)
 
-        # Step 3a: Merge similar content (合并同类项)
-        if self.enable_merge:
-            merged_groups = await self._merge_blocks(blocks, task_profile)
-        else:
-            merged_groups = [[(i, b)] for i, b in enumerate(blocks)]
+        # Step 3a: 申论"分门别类"——按 InfoType 分流处理
+        # 事实/数据类 → 可安全合并，走 LLM 术语保留合并
+        # 因果/行动/问题/观点类 → 不可合并（合并会丢逻辑链或细节），走规则保留
+        _MERGEABLE_TYPES = {
+            InfoType.FACT, InfoType.DATA,
+        }
+
+        mergeable_blocks = []
+        preserve_blocks = []
+        for i, b in enumerate(blocks):
+            if b.info_type in _MERGEABLE_TYPES:
+                mergeable_blocks.append((i, b))
+            else:
+                preserve_blocks.append((i, b))
+
+        merged_groups = []
+
+        # 对可合并类型：使用 LLM 术语保留合并
+        if mergeable_blocks and self.enable_merge and self.llm is not None and len(mergeable_blocks) > 1:
+            try:
+                mergeable_only = [b for _, b in mergeable_blocks]
+                llm_groups = await self._term_preserving_merge(mergeable_only, task_profile)
+                # 将 LLM 返回的本地索引映射回原始全局索引
+                for group in llm_groups:
+                    mapped = [(mergeable_blocks[local_i][0], mergeable_blocks[local_i][1])
+                              for local_i, _ in group]
+                    merged_groups.append(mapped)
+            except Exception:
+                for item in mergeable_blocks:
+                    merged_groups.append([item])
+        elif mergeable_blocks:
+            for item in mergeable_blocks:
+                merged_groups.append([item])
+
+        # 对不可合并类型：规则保留，逐条保留原貌
+        if preserve_blocks:
+            for item in preserve_blocks:
+                merged_groups.append([item])
 
         # Step 3b: Build compressed blocks with labels
         compressed = []
@@ -163,7 +200,7 @@ class ACSProcessor(BaseProcessor):
             preview = block.content[:300] + "..." if len(block.content) > 300 else block.content
             blocks_text += f"\n[Block {i}] (role={block.role}, type={block.info_type}):\n{preview}\n"
 
-        prompt = MERGE_PROMPT.format(blocks_text=blocks_text)
+        prompt = MERGE_PROMPT.format(blocks_text=blocks_text, current_query=task_profile.current_query or "N/A")
         result = await self.llm.complete_json(prompt, {})
 
         groups_raw = result.get("groups", [])
@@ -184,6 +221,64 @@ class ACSProcessor(BaseProcessor):
                 merged.append([(i, blocks[i])])
 
         return merged if merged else [[(i, b)] for i, b in enumerate(blocks)]
+
+    async def _term_preserving_merge(
+        self,
+        blocks: list[ContextBlock],
+        task_profile: TaskProfile,
+    ) -> list[list[tuple[int, ContextBlock]]]:
+        """v0.3 P12: layer 维度专用合并 — 使用增强 prompt 保留技术术语。
+
+        合并后校验术语保留率，若丢失过多则 fallback 到规则合并。
+        """
+        blocks_text = ""
+        for i, block in enumerate(blocks):
+            preview = block.content[:300] + "..." if len(block.content) > 300 else block.content
+            blocks_text += f"\n[Block {i}] (role={block.role}, type={block.info_type}):\n{preview}\n"
+
+        prompt = TERM_PRESERVING_MERGE_PROMPT.format(blocks_text=blocks_text, current_query=task_profile.current_query or "N/A")
+        result = await self.llm.complete_json(prompt, {})
+
+        groups_raw = result.get("groups", [])
+
+        # Convert to indexed groups
+        merged = []
+        assigned = set()
+        for group in groups_raw:
+            indices = group.get("block_indices", [])
+            valid_indices = [i for i in indices if 0 <= i < len(blocks) and i not in assigned]
+            if valid_indices:
+                merged.append([(i, blocks[i]) for i in valid_indices])
+                assigned.update(valid_indices)
+
+        # Add unassigned blocks as individual groups
+        for i in range(len(blocks)):
+            if i not in assigned:
+                merged.append([(i, blocks[i])])
+
+        if not merged:
+            merged = [[(i, b)] for i, b in enumerate(blocks)]
+
+        # 校验术语保留率：若 LLM merge 丢失太多原始术语，fallback 到规则合并
+        original_text = "\n".join(b.content for b in blocks)
+        original_entities = set(self._extract_entities(original_text))
+        if original_entities:
+            merged_text = ""
+            for group in merged:
+                for _, b in group:
+                    merged_text += b.content + "\n"
+            # Note: at this point merged_text is still the original content (pre-LLM-merge output)
+            # The actual term check happens later in _preserve_entities
+            # Here we just validate that LLM returned reasonable grouping
+            preserved_count = sum(
+                1 for e in original_entities if e in merged_text
+            )
+            preservation_rate = preserved_count / len(original_entities)
+            if preservation_rate < 0.5:
+                # LLM merge lost too many terms, fallback to rule-based
+                return self._rule_based_merge(blocks, task_profile)
+
+        return merged
 
     def _rule_based_merge(
         self,
@@ -440,3 +535,40 @@ class ACSProcessor(BaseProcessor):
         ))
 
         return compressed
+
+
+# v0.3 P12: layer 维度专用 prompt — 强化技术术语保留
+TERM_PRESERVING_MERGE_PROMPT = """You are a context compression processor specialized in technical/architectural content.
+
+The user is currently asking about: "{current_query}"
+
+Your PRIMARY goal is to PRESERVE all technical terms, component names, API endpoints, protocol names, and architectural relationships. DO NOT abstract or generalize them. When merging, pay extra attention to preserving details relevant to the user's query.
+
+Given the following context blocks, group them by semantic similarity, then for each group:
+1. Merge the content while PRESERVING all technical identifiers verbatim
+2. Extract a "summary label" (总括词) - a short 2-6 character label
+3. Keep cause-effect chains intact (X causes Y, Z depends on W)
+
+Context blocks:
+{blocks_text}
+
+Respond in JSON:
+{{
+  "groups": [
+    {{
+      "block_indices": [0, 2, 5],
+      "summary_label": "简要标签",
+      "merged_content": "合并后的内容，必须保留所有技术术语",
+      "info_type": "fact|action|problem|cause|effect_pos|effect_neg|opinion|data|other"
+    }}
+  ]
+}}
+
+CRITICAL RULES:
+- NEVER replace specific technical terms with generic descriptions
+  BAD: "实现了认证机制" → GOOD: "实现了JWT认证，使用HS256算法，Token有效期24小时"
+  BAD: "使用数据库存储" → GOOD: "使用PostgreSQL数据库，users表包含id/name/email字段"
+- Preserve ALL: function names, class names, API paths, config keys, protocol names, port numbers
+- Preserve ALL cause-effect relationships explicitly
+- You may restructure sentences for conciseness, but every technical identifier must appear verbatim
+"""

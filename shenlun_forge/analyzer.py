@@ -283,6 +283,7 @@ class ACSAnalyzer(BaseAnalyzer):
             priority_rules=priority_rules,
             classification_dimension=classification_dimension,
             output_logic=output_logic,
+            current_query=current_query,
         )
 
     def _rule_based_analyze(
@@ -325,6 +326,7 @@ class ACSAnalyzer(BaseAnalyzer):
             priority_rules=DEFAULT_PRIORITIES.get(task_type, DEFAULT_PRIORITIES[TaskType.CONVERSATION]),
             classification_dimension=classification_dimension,
             output_logic=output_logic,
+            current_query=current_query,
         )
 
     def _extract_key_elements_heuristic(

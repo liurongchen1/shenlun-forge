@@ -67,6 +67,8 @@ class TaskProfile:
     # v0.3 P0: 分类维度与输出逻辑（供 Retriever/Formatter 使用）
     classification_dimension: str = "auto"  # auto / temporal / spatial / causal / layer / element
     output_logic: str = "auto"  # auto / parallel / causal / progressive / temporal
+    # v0.3 Retriever 增强: 原始查询（供 Retriever 直接提取英文术语）
+    current_query: str = ""
 
 
 @dataclass
