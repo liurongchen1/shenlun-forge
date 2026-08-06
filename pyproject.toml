@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shenlun-forge"
-version = "0.2.4"
+version = "0.2.2"
 description = "Task-driven context compression for LLM agents with analytical compression strategy"
 readme = "README.md"
 license = {text = "MIT"}
@@ -28,7 +28,8 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 langchain = ["langchain-core>=0.1"]
-full = ["openai>=1.0", "langchain-core>=0.1", "anthropic>=0.20"]
+embedding = ["fastembed>=0.3.0"]
+full = ["openai>=1.0", "langchain-core>=0.1", "anthropic>=0.20", "fastembed>=0.3.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 
 [project.scripts]

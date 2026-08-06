@@ -16,10 +16,6 @@ from .types import ContextBlock, CompressedBlock, TaskProfile, TaskType, InfoTyp
 
 MERGE_PROMPT = """You are a context compression processor. Your job is to merge similar/related context blocks and extract summary labels.
 
-The user is currently asking about: "{current_query}"
-
-When merging, PRIORITIZE preserving information directly relevant to this query. Information unrelated to the query can be compressed more aggressively, but never discard concrete facts, numbers, or technical details.
-
 Given the following context blocks, group them by semantic similarity, then for each group:
 1. Merge the content into a concise representation
 2. Extract a "summary label" (总括词) - a short 2-6 character label that captures the essence
@@ -200,7 +196,7 @@ class ACSProcessor(BaseProcessor):
             preview = block.content[:300] + "..." if len(block.content) > 300 else block.content
             blocks_text += f"\n[Block {i}] (role={block.role}, type={block.info_type}):\n{preview}\n"
 
-        prompt = MERGE_PROMPT.format(blocks_text=blocks_text, current_query=task_profile.current_query or "N/A")
+        prompt = MERGE_PROMPT.format(blocks_text=blocks_text)
         result = await self.llm.complete_json(prompt, {})
 
         groups_raw = result.get("groups", [])
@@ -236,7 +232,7 @@ class ACSProcessor(BaseProcessor):
             preview = block.content[:300] + "..." if len(block.content) > 300 else block.content
             blocks_text += f"\n[Block {i}] (role={block.role}, type={block.info_type}):\n{preview}\n"
 
-        prompt = TERM_PRESERVING_MERGE_PROMPT.format(blocks_text=blocks_text, current_query=task_profile.current_query or "N/A")
+        prompt = TERM_PRESERVING_MERGE_PROMPT.format(blocks_text=blocks_text)
         result = await self.llm.complete_json(prompt, {})
 
         groups_raw = result.get("groups", [])
@@ -540,9 +536,7 @@ class ACSProcessor(BaseProcessor):
 # v0.3 P12: layer 维度专用 prompt — 强化技术术语保留
 TERM_PRESERVING_MERGE_PROMPT = """You are a context compression processor specialized in technical/architectural content.
 
-The user is currently asking about: "{current_query}"
-
-Your PRIMARY goal is to PRESERVE all technical terms, component names, API endpoints, protocol names, and architectural relationships. DO NOT abstract or generalize them. When merging, pay extra attention to preserving details relevant to the user's query.
+Your PRIMARY goal is to PRESERVE all technical terms, component names, API endpoints, protocol names, and architectural relationships. DO NOT abstract or generalize them.
 
 Given the following context blocks, group them by semantic similarity, then for each group:
 1. Merge the content while PRESERVING all technical identifiers verbatim

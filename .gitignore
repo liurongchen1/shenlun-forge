@@ -6,4 +6,11 @@ build/
 *.whl
 .pytest_cache/
 venv/
-experiments
+experiments/
+docs/
+tests/
+*.txt
+!requirements*.txt
+.DS_Store
+.idea/
+.vscode/

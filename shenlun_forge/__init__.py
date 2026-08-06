@@ -50,6 +50,15 @@ from .retriever import ACSRetriever
 from .processor import ACSProcessor
 from .formatter import ACSFormatter
 
+# EmbeddingRetriever requires optional deps (sentence-transformers, torch)
+# Import lazily — don't fail if not installed
+try:
+    from .embedding_retriever import EmbeddingRetriever
+    _HAS_EMBEDDING = True
+except ImportError:
+    EmbeddingRetriever = None  # type: ignore
+    _HAS_EMBEDDING = False
+
 __all__ = [
     "ShenlunForge",
     "OpenAIProvider",
@@ -58,6 +67,7 @@ __all__ = [
     "ACSRetriever",
     "ACSProcessor",
     "ACSFormatter",
+    "EmbeddingRetriever",
     "SimpleStrategy",
     "ContextBlock",
     "CompressedBlock",

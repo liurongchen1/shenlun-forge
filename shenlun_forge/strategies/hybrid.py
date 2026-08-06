@@ -59,6 +59,7 @@ class HCSCompressor:
         code_budget_ratio: float = 0.4,
         min_narrative_budget: int = 200,
         fallback_savings_threshold: float = 80.0,
+        retriever_type: str = "rule",
     ):
         if llm is not None:
             self.llm = llm
@@ -71,9 +72,15 @@ class HCSCompressor:
 
         # ACS pipeline
         self.analyzer = ACSAnalyzer(llm=self.llm)
-        self.retriever = ACSRetriever(llm=self.llm)
         self.processor = ACSProcessor(llm=self.llm)
         self.formatter = ACSFormatter(llm=self.llm)
+
+        # Retriever: rule-based or embedding
+        if retriever_type == "embedding":
+            from ..embedding_retriever import EmbeddingRetriever
+            self.retriever = EmbeddingRetriever()
+        else:
+            self.retriever = ACSRetriever(llm=self.llm)
 
         self.code_budget_ratio = code_budget_ratio
         self.min_narrative_budget = min_narrative_budget
@@ -85,6 +92,7 @@ class HCSCompressor:
         current_query: str = "",
         max_tokens: int = 4000,
         verbose: bool = False,
+        recent_window: int = 6,
     ) -> CompressionResult:
         start_time = time.time()
         steps_log = {}
@@ -93,9 +101,18 @@ class HCSCompressor:
         blocks = self._parse_messages(messages)
         original_tokens = sum(b.token_count for b in blocks)
 
-        # ─── Step 1: Extract code blocks verbatim ──────────────────────
+        # Recent window protection: keep last N messages uncompressed
+        recent_window_size = min(recent_window, len(blocks))
+        if recent_window_size > 0 and len(blocks) > recent_window_size:
+            early_blocks = blocks[:-recent_window_size]
+            recent_blocks = blocks[-recent_window_size:]
+        else:
+            early_blocks = blocks
+            recent_blocks = []
+
+        # ─── Step 1: Extract code blocks verbatim (from early blocks) ───
         t0 = time.time()
-        code_blocks_text, code_token_count = self._extract_code_blocks(blocks)
+        code_blocks_text, code_token_count = self._extract_code_blocks(early_blocks)
         steps_log["code_extraction"] = {
             "duration_ms": round((time.time() - t0) * 1000),
             "code_tokens": code_token_count,
@@ -119,15 +136,15 @@ class HCSCompressor:
             "narrative_budget": narrative_budget,
         }
 
-        # ─── Step 3: Run ACS on ALL messages ───────────────────────
+        # ─── Step 3: Run ACS on early messages ───────────────────────
         t0 = time.time()
         acs_text, acs_steps = await self._run_acs_pipeline(
-            blocks, current_query, narrative_budget,
+            early_blocks, current_query, narrative_budget,
         )
         steps_log["acs"] = acs_steps
         acs_tokens = self.llm.count_tokens(acs_text) if acs_text else 0
 
-        # ─── Step 4: Merge ACS + verbatim code ─────────────────────
+        # ─── Step 4: Merge ACS + verbatim code + recent window ─────
         parts = []
         if acs_text.strip():
             parts.append(acs_text)
@@ -138,6 +155,10 @@ class HCSCompressor:
                 truncated_code = self._truncate_text(code_blocks_text, actual_code_tokens)
             parts.append("## Preserved Code Blocks")
             parts.append(truncated_code)
+        if recent_blocks:
+            recent_text = "\n".join(b.content for b in recent_blocks)
+            parts.append("## Recent Messages (Uncompressed)")
+            parts.append(recent_text)
 
         compressed_text = "\n\n".join(parts) if parts else ""
         compressed_tokens = self.llm.count_tokens(compressed_text)
@@ -159,9 +180,9 @@ class HCSCompressor:
         if acs_text:
             compressed_blocks.append(CompressedBlock(
                 content=acs_text,
-                original_indices=list(range(len(messages))),
+                original_indices=list(range(len(early_blocks))),
                 summary_label="acs_summary",
-                preserved_token_count=original_tokens,
+                preserved_token_count=sum(b.token_count for b in early_blocks),
                 compression_ratio=acs_tokens / max(original_tokens, 1),
             ))
         if code_blocks_text.strip():
@@ -172,6 +193,16 @@ class HCSCompressor:
                 preserved_token_count=code_token_count,
                 compression_ratio=1.0,
             ))
+        if recent_blocks:
+            for b in recent_blocks:
+                compressed_blocks.append(CompressedBlock(
+                    content=b.content,
+                    original_indices=[b.msg_index],
+                    summary_label="近期消息",
+                    info_type=b.info_type,
+                    preserved_token_count=b.token_count,
+                    compression_ratio=1.0,
+                ))
 
         return CompressionResult(
             compressed_text=compressed_text,

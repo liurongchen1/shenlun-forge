@@ -185,10 +185,8 @@ class ACSRetriever(BaseRetriever):
         # Sort by relevance score (descending)
         scored_blocks.sort(key=lambda x: x.relevance_score, reverse=True)
 
-        # Select top-k blocks with adaptive cap (max 40% of total blocks)
-        # Prevents over-selection when conversation is short
-        adaptive_k = min(self.top_k, max(5, int(len(scored_blocks) * 0.4)))
-        k = min(adaptive_k, len(scored_blocks))
+        # Select top-k blocks (fixed top_k, no adaptive cap)
+        k = min(self.top_k, len(scored_blocks))
         filtered = scored_blocks[:k]
 
         # Re-sort by original position to maintain context flow
