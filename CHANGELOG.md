@@ -7,6 +7,19 @@ distribution versions on PyPI.
 
 ### Added
 
+- **`shenlun-forge demo`** — one command, no API key, no network, under a
+  second. It runs a built-in 32-message conversation (three unrelated topics)
+  through plain truncation and through this library, and prints which messages
+  each one kept, whether the one that answers the question survived, and the
+  closing note the summary appends. `--lang zh` for Chinese, `--budget N` to
+  change the demonstrated budget.
+
+  It exists because the difference this library makes is not "shorter text" —
+  truncation does that for free — but *which* messages survive. A demo that
+  only showed token counts would advertise the wrong thing. Two tests keep it
+  honest: one asserts the answering message really does survive compression,
+  and one asserts truncation really does lose it.
+
 - **The summary now says what it does not contain.** Every result ends with a
   line like
   `[compression note] 37 earlier messages (~12,480 tokens) are not included above.`

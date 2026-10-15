@@ -2,11 +2,15 @@
 """ShenlunForge CLI — command-line interface for context compression.
 
 Usage:
+    shenlun-forge demo [--lang en|zh]
     shenlun-forge compress [OPTIONS]
     shenlun-forge strategies
     shenlun-forge version
 
 Examples:
+    # See what it does on a built-in conversation: no key, no network, <1s
+    shenlun-forge demo
+
     # Compress a JSON messages file (default strategy: simple, no API key)
     shenlun-forge compress --messages messages.json --query "What did we decide?" --max-tokens 4000
 
@@ -142,6 +146,25 @@ def get_parser() -> argparse.ArgumentParser:
 
     # --- strategies ---
     subparsers.add_parser("strategies", help="List available compression strategies")
+
+    # --- demo ---
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="See what it does on a built-in conversation (no API key, no network)",
+    )
+    demo_parser.add_argument(
+        "--lang",
+        choices=["auto", "en", "zh"],
+        default="auto",
+        help="Output language (default: auto — follows your locale, Chinese if it "
+             "is a Chinese one, English otherwise)",
+    )
+    demo_parser.add_argument(
+        "--budget", "-t",
+        type=int,
+        default=300,
+        help="Token budget for the demo compression (default: 300)",
+    )
 
     # --- eval ---
     eval_parser = subparsers.add_parser(
@@ -310,6 +333,23 @@ def cmd_version(args):
     print(f"shenlun-forge {__version__}")
 
 
+def _demo_language(requested: str) -> str:
+    """Resolve --lang, defaulting to the locale rather than to English."""
+    if requested != "auto":
+        return requested
+    locale = (
+        os.getenv("LC_ALL") or os.getenv("LC_MESSAGES") or os.getenv("LANG") or ""
+    ).lower()
+    return "zh" if locale.startswith("zh") else "en"
+
+
+def cmd_demo(args):
+    """Show what compression does, on a conversation that ships with the package."""
+    from .demo import run_demo
+
+    print(run_demo(lang=_demo_language(args.lang), budget=args.budget))
+
+
 async def run_eval(args):
     """Measure compression on the user's own conversations."""
     import json as _json
@@ -371,13 +411,15 @@ def main():
     parser = get_parser()
     args = parser.parse_args()
 
-    if args.command in ("compress", "eval"):
+    if args.command in ("compress", "eval", "demo"):
         maybe_show_star_hint()
 
     if args.command == "compress":
         asyncio.run(run_compress(args))
     elif args.command == "eval":
         asyncio.run(run_eval(args))
+    elif args.command == "demo":
+        cmd_demo(args)
     elif args.command == "strategies":
         cmd_strategies(args)
     elif args.command == "version":

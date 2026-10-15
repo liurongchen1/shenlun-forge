@@ -51,6 +51,20 @@ pip install "shenlun-forge[full]"                          # 全部
 
 ## 30 秒上手，不需要 API key / 30 seconds, no API key
 
+想先看一眼它到底在干什么——不用 key、不联网、不到一秒：
+
+```bash
+shenlun-forge demo          # 英文输出；中文加 --lang zh
+```
+
+它把同一段对话分别交给「粗暴截断」和本库，然后告诉你各自留下了哪几条消息。差别就在
+这里：截断永远是那根尾巴，而这里留下来的是问题需要的那几条。
+
+The same thing in English: `shenlun-forge demo` hands one conversation to plain
+truncation and to this library, then shows which messages each one kept.
+Truncation always returns the same tail; here the survivors depend on the
+question.
+
 ```python
 from shenlun_forge import ShenlunForge
 
@@ -211,6 +225,9 @@ reported in `stats` either way.
 ## 命令行 / CLI
 
 ```bash
+# 先看它到底在干什么（内置对话，不需要 key）
+shenlun-forge demo            # 中文；英文用 --lang en
+
 # 纯规则，不需要 key（默认）
 shenlun-forge compress --messages chat.json --query "我们最后决定了什么？"
 

@@ -19,6 +19,17 @@ you need them:
 | `embedding` | `pip install "shenlun-forge[embedding]"` | Semantic retrieval (~95MB ONNX model, downloaded on first use) |
 | `full` | `pip install "shenlun-forge[full]"` | Everything above |
 
+## 1.5. See it work first (30 seconds, no key, no network)
+
+```bash
+shenlun-forge demo
+```
+
+One conversation, two questions, no setup. It runs the same history through
+plain truncation and through this library, then prints which messages each one
+kept and whether the answering message survived. `--lang zh` for Chinese,
+`--budget N` to change the token budget it demonstrates with.
+
 ## 2. Compress something, no API key
 
 Put a conversation in a JSON file:
