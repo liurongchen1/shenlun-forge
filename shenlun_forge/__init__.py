@@ -25,6 +25,9 @@ Quick Start:
         max_tokens=4000,
     )
     print(result.compressed_text)
+
+If this library helps you, a star on GitHub is the nicest way to say so:
+https://github.com/liurongchen1/shenlun-forge
 """
 
 from ._version import __version__

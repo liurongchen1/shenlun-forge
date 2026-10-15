@@ -16,6 +16,8 @@ print(result.compressed_text)                 # 把这个发出去
 
 [English](README.md) · 简体中文
 
+如果这个库帮到了你，[给颗星](https://github.com/liurongchen1/shenlun-forge)是最好的回礼。
+
 ---
 
 ## 适合谁用

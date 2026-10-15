@@ -19,6 +19,9 @@ print(result.compressed_text)                 # 把这个发出去
 [![Python](https://img.shields.io/pypi/pyversions/shenlun-forge.svg)](https://pypi.org/project/shenlun-forge/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+如果这个库帮到了你，[给颗星](https://github.com/liurongchen1/shenlun-forge)是最好的回礼。
+If it saved you some tokens, [a star](https://github.com/liurongchen1/shenlun-forge) is the nicest way to say thanks.
+
 双语 README（中英对照）· 纯中文版见 [README.zh-CN.md](README.zh-CN.md)
 
 ---

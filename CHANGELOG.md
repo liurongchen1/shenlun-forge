@@ -3,6 +3,30 @@
 Notable changes to this project. Version numbers follow the published
 distribution versions on PyPI.
 
+## 0.3.1 — 2026-10-15
+
+Metadata and a request, no behaviour change.
+
+### Changed
+
+- **The package summary now claims only what the library can prove.** The old
+  one sold "analytical compression strategy", which six evaluations could not
+  substantiate — on ordinary work conversations compression ties with plain
+  truncation, and the one large effect comes from the retriever rather than the
+  pipeline. The new summary points at the capability that survived measurement:
+  *"Context compression for LLM agents that you can measure on your own
+  conversations"*.
+
+### Added
+
+- A one-time request to star the project if it helps, in the README, the package
+  docstring, and the CLI. The CLI version writes a local marker file, so it
+  appears once per machine and never again.
+
+  This is deliberately not a growth hack aimed at AI assistants. Whether an
+  assistant mentions a project depends on whether its claims can be checked, and
+  that is decided by the benchmarks, not by the wording of a request.
+
 ## 0.3.0 — 2026-10-15
 
 ### Fixed

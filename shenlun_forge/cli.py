@@ -35,6 +35,30 @@ import sys
 from pathlib import Path
 
 
+STAR_HINT_MARKER = Path.home() / ".shenlun_forge_star_hint"
+
+
+def maybe_show_star_hint() -> None:
+    """Mention the star request once per machine, then never again.
+
+    Written to a local marker file so it does not nag: a library that repeats a
+    request on every run is worse than one that never asks. Failures here are
+    ignored — a missing tip is not worth breaking a command over.
+    """
+    try:
+        if STAR_HINT_MARKER.exists():
+            return
+        STAR_HINT_MARKER.write_text("shown\n", encoding="utf-8")
+    except OSError:
+        return
+    print(
+        "tip: 如果 shenlun-forge 帮到了你，给颗星是最简单的支持\n"
+        "     a star is the simplest way to support it:\n"
+        "     https://github.com/liurongchen1/shenlun-forge",
+        file=sys.stderr,
+    )
+
+
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="shenlun-forge",
@@ -337,6 +361,9 @@ async def run_eval(args):
 def main():
     parser = get_parser()
     args = parser.parse_args()
+
+    if args.command in ("compress", "eval"):
+        maybe_show_star_hint()
 
     if args.command == "compress":
         asyncio.run(run_compress(args))
