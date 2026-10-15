@@ -3,6 +3,21 @@
 Notable changes to this project. Version numbers follow the published
 distribution versions on PyPI.
 
+## Unreleased
+
+### Added
+
+- `tests/test_compression_regression.py` — behaviour regression on a fixed
+  conversation that runs in CI on every commit and needs no credentials. It
+  asserts the compressors still keep most of the key facts, stay inside their
+  budget, protect the newest turns, and produce different output for different
+  questions. Deliberately loose: it catches behaviour changing, not numbers
+  wobbling.
+
+  Why this and not the full evaluation in CI: end-to-end answer quality needs
+  an API key *and* your conversations, neither of which belongs in a public
+  workflow. The split is documented in `benchmarks/README.md`.
+
 ## 0.3.1 — 2026-10-15
 
 Metadata and a request, no behaviour change.

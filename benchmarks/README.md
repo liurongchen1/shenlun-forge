@@ -347,6 +347,20 @@ python benchmarks/regression.py --set qa-set.json
 - It is **not** wired into CI because it needs an API key. Run it before a
   release and after any change to the retriever, processor or formatter.
 
+What CI *does* run on every commit, since it needs no credentials:
+`tests/test_compression_regression.py` — a fixed conversation, with assertions
+that the compressors still keep most of the key facts, stay inside the budget,
+protect the newest turns, and produce different output for different questions.
+It is deliberately loose ("still useful", not "unchanged"), so it catches
+behaviour changing rather than numbers wobbling.
+
+The division of labour:
+
+| Layer | Runs | Needs |
+|---|---|---|
+| Unit + compression behaviour | every commit (CI) | nothing |
+| End-to-end answer quality (`shenlun-forge eval`) | before a release, by hand | an API key and your conversations |
+
 The committed baseline has two entries: one from public LongMemEval data (which
 anyone can reproduce) and one from the private workload that produced the
 opposite result, kept because a baseline that only contains the flattering case

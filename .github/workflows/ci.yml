@@ -34,7 +34,7 @@ jobs:
       - name: Version consistency
         run: python scripts/check_version.py
 
-      - name: Tests
+      - name: Tests (unit + compression regression, no credentials needed)
         run: pytest tests/ -q
 
       - name: Examples run without credentials
