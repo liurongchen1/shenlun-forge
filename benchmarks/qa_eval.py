@@ -78,10 +78,20 @@ async def compress_history(
     model: str,
     dropped_notice: bool = True,
     external_cmd: Optional[str] = None,
+    external_budget_scale: float = 1.0,
 ) -> tuple:
     """Return (context_text, compression_ratio) for one strategy."""
     if external_cmd:
-        return await compress_external(external_cmd, point, budget)
+        text, _ = await compress_external(
+            external_cmd, point, budget, external_budget_scale
+        )
+        # Ratio measured here, with this file's tokenizer, rather than taken
+        # from the compressor. Otherwise each strategy reports its own idea of
+        # a token and the ratios cannot be lined up with each other.
+        original = "\n".join(
+            f"[{m.get('role')}] {m.get('content')}" for m in point["history"]
+        )
+        return text, count_tokens(text) / max(count_tokens(original), 1)
     if strategy == "truncate":
         return truncate_history(point["history"], budget), 1.0
     if strategy == "none":
@@ -109,7 +119,9 @@ async def compress_history(
     return result.compressed_text, result.compression_ratio
 
 
-async def compress_external(cmd: str, point: dict, budget: int) -> tuple:
+async def compress_external(
+    cmd: str, point: dict, budget: int, budget_scale: float = 1.0
+) -> tuple:
     """Run someone else's compressor as a subprocess and use its output.
 
     The contract is deliberately tiny — JSON in on stdin, JSON out on stdout —
@@ -120,11 +132,18 @@ async def compress_external(cmd: str, point: dict, budget: int) -> tuple:
 
     stdin:  {"messages": [{"role": ..., "content": ...}], "query": ..., "maxTokens": N}
     stdout: {"text": "...", "ratio": 0.31}
+
+    ``budget_scale`` exists because "how many tokens fit" is not a shared unit.
+    A compressor that estimates tokens as ``len(text) / 3`` — common on servers
+    with no tokenizer installed — sees Chinese text as ~2.2x cheaper than it
+    really is, so the same ``maxTokens`` buys it far more context. Measuring
+    that compressor against an equal budget means dividing the number you hand
+    it by the ratio you measured. Pass it with ``--external-budget-scale``.
     """
     payload = json.dumps({
         "messages": point["history"],
         "query": point["query"],
-        "maxTokens": budget,
+        "maxTokens": max(1, int(budget * budget_scale)),
     }).encode()
 
     process = await asyncio.create_subprocess_shell(
@@ -166,6 +185,7 @@ async def evaluate_point(
     samples: int,
     dropped_notice: bool = True,
     external_cmd: Optional[str] = None,
+    external_budget_scale: float = 1.0,
 ) -> dict:
     """Compress once, then answer+judge `samples` times.
 
@@ -175,7 +195,7 @@ async def evaluate_point(
     """
     context, ratio = await compress_history(
         strategy, point, budget, forge_cache, api_key, base_url, model,
-        dropped_notice, external_cmd)
+        dropped_notice, external_cmd, external_budget_scale)
 
     total = max(len(point["points"]), 1)
     scores, answers = [], []
@@ -302,6 +322,11 @@ async def main() -> int:
                              "must print {\"text\": ..., \"ratio\": ...} on stdout. Repeat "
                              "for several. This is how a comparison stays honest: same "
                              "points, same frozen answer key, same judge, one variable.")
+    parser.add_argument("--external-budget-scale", type=float, default=1.0,
+                        help="Multiply maxTokens handed to --external commands. Use it "
+                             "when the other compressor counts tokens differently: a "
+                             "len/3 estimator treats Chinese as ~2.2x cheaper than a real "
+                             "tokenizer, so passing 0.45 gives it the same real budget.")
     args = parser.parse_args()
 
     if not args.api_key:
@@ -405,6 +430,7 @@ async def main() -> int:
                 args.samples,
                 dropped_notice_for[strategy],
                 external_for.get(strategy),
+                args.external_budget_scale,
             )
             rows.append(row)
             write_out({**{s: results[s]["rows"] for s in results}, strategy: rows})

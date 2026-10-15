@@ -9,16 +9,25 @@
  *   stdout: {"text": "<compressed context>", "ratio": 0.31}
  *
  * This copy is written against a TypeScript harness that exposes
- * `createStrategy(name).compress(messages, query, { maxTokens })`. Point
- * HARNESS_DIR at that project; nothing in it is modified or copied.
+ * `compressContext(messages, query, options)` — point HARNESS_DIR at that
+ * project and nothing in it is modified or copied. It calls the same entry
+ * point the running service calls, not the strategy underneath it, so the
+ * recent-message window, the strategy routing and the fallback path are all
+ * part of what gets scored.
  *
- *   cd /path/to/harness && HARNESS_DIR=$PWD HARNESS_STRATEGY=simple \
+ *   cd /path/to/harness && HARNESS_DIR=$PWD HARNESS_STRATEGY=auto \
  *     npx tsx /path/to/this/adapter.ts
  *
  * Run it from inside the harness directory: that is where `npx tsx` and its
  * node_modules live. The adapter itself imports nothing from the harness at
  * build time — only at run time, from the path you give it — so the code being
  * scored is always the code that is actually deployed, not a copy that drifts.
+ *
+ * Env:
+ *   HARNESS_DIR       project root (required)
+ *   HARNESS_STRATEGY  "auto" (default, matches production) | simple | acs | hcs
+ *   HARNESS_USE_LLM   "1" to let the strategy call a model (default off, which
+ *                     is also what production does — nothing passes a gateway)
  */
 
 import path from "node:path";
@@ -40,20 +49,26 @@ async function main(): Promise<void> {
   const input = JSON.parse(await readStdin());
   const modulePath = path.join(
     harnessDir,
-    "src/lib/harness/compression/registry.ts"
+    "src/lib/harness/context-compressor.ts"
   );
-  const { createStrategy } = await import(pathToFileURL(modulePath).href);
+  const { compressContext } = await import(pathToFileURL(modulePath).href);
 
-  const strategy = createStrategy(process.env.HARNESS_STRATEGY ?? "simple");
-  const result = await strategy.compress(input.messages, input.query ?? "", {
+  const compressed = await compressContext(input.messages, input.query ?? "", {
     maxTokens: input.maxTokens ?? 4000,
-    useLlm: false,
+    strategy: process.env.HARNESS_STRATEGY ?? "auto",
+    useLlm: process.env.HARNESS_USE_LLM === "1",
   });
 
   process.stdout.write(
     JSON.stringify({
-      text: result.compressedText,
-      ratio: result.compressionRatio,
+      text: compressed
+        .map((message: { role: string; content: string }) =>
+          `[${message.role}] ${message.content}`
+        )
+        .join("\n"),
+      // Reported for eyeballing only; qa_eval.py re-measures the ratio with its
+      // own tokenizer so that every strategy is compared in the same units.
+      ratio: 1,
     })
   );
 }

@@ -95,3 +95,18 @@ def test_empty_output_is_reported():
             _command("import json,sys; json.load(sys.stdin); print(json.dumps({'text': ''}))"),
             POINT, 100,
         ))
+
+
+def test_budget_scale_compensates_for_a_different_token_count():
+    """Two compressors must be handed the same real budget, not the same number.
+
+    A `len(text)/3` estimator sees Chinese as ~2.2x cheaper than a real
+    tokenizer, so "4000" means two very different amounts of context to the two
+    implementations. The scale factor is how the comparison stays honest.
+    """
+    reader = "d['maxTokens']"
+    text, _ = asyncio.run(qa_eval.compress_external(
+        _command(f"import json,sys; d=json.load(sys.stdin); print(json.dumps({{'text': str({reader})}}))"),
+        POINT, 4000, 0.45,
+    ))
+    assert text == "1800"
