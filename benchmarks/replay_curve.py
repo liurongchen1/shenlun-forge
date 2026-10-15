@@ -62,6 +62,7 @@ def replay(
     recent: int,
     label: str,
     matched_budgets: list | None = None,
+    protect_user_messages: bool = False,
 ):
     series = []
     history: list[dict[str, str]] = []
@@ -82,6 +83,7 @@ def replay(
                     current_query=query,
                     max_tokens=turn_budget,
                     recent_window=recent,
+                    protect_user_messages=protect_user_messages,
                 )
                 context_text = result.compressed_text
             else:
@@ -124,6 +126,9 @@ def main() -> int:
     parser.add_argument("--match-label", default=None,
                         help="read <label>-sim-<id>.json and give this run the same "
                              "context size the other implementation sent, turn by turn")
+    parser.add_argument("--protect-user", action="store_true",
+                        help="rank user turns ahead of everything else (see "
+                             "SimpleStrategy.protect_user_messages)")
     args = parser.parse_args()
 
     forge = ShenlunForge.create(strategy=args.strategy)
@@ -141,7 +146,8 @@ def main() -> int:
             ]
         started = time.time()
         payload = replay(
-            conversation_id, rows, forge, args.budget, args.recent, args.label, matched
+            conversation_id, rows, forge, args.budget, args.recent, args.label,
+            matched, args.protect_user,
         )
         out = args.dir / f"{args.label}-sim-{conversation_id}.json"
         out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

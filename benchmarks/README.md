@@ -384,6 +384,75 @@ python benchmarks/analyze_notice_ab.py notice-ab.json
 declares the information missing, how often a concrete answer covered none of
 the key points, and the same numbers per compression-ratio band.
 
+### Replaying a whole conversation, turn by turn
+
+Every evaluation above asks one question: with this history and this budget,
+can the model answer? A long-running agent has a different failure mode — the
+history is compressed *repeatedly* as the conversation grows, so what matters
+is whether an early constraint is still visible at turn 40. That is what the
+two scripts here measure:
+
+```bash
+# 1. Walk the conversation the way the agent does: compress the history, then
+#    append the turn. One file per conversation.
+python benchmarks/replay_curve.py --label shenlun --match-label harness 22 138
+
+# 2. Score it, save a baseline, and fail when a change makes it worse.
+python benchmarks/replay_regression.py --label shenlun --save-baseline 22 138
+python benchmarks/replay_regression.py --label shenlun 22 138   # exit 1 on regression
+```
+
+Input is `conv<id>.json` — `[{id, role, content}]`, oldest first, straight out
+of a production database (`select json_agg(row_to_json(t)) from (select id,
+role, content from "Message" where "conversationId" = <id> order by id) t`).
+The output shape matches what a TypeScript harness writes for its own replay,
+so a report built on one can read the other. `--match-label` is what makes the
+comparison mean anything: it hands this run exactly the context size the other
+implementation sent, turn by turn. Without it the harness ran at 14,633
+"tokens" against 2,006 for the same points, which measures who was allowed to
+send more — a harness that keeps a verbatim tail next to its summary sends
+several times the budget its own configuration claims.
+
+**The metric is hard information, deliberately.** Paths, URLs, IPs, ports,
+command lines, filenames, numbers, config literals and constant names — things
+that cannot be paraphrased, matched by substring against what the model was
+actually shown. No LLM judge means no cost, no variance, and the same answer
+twice. `replay_regression.py` mirrors the extraction rules a JS report uses, and
+reproduces its numbers to within a point (conv22: 20.7% vs 20.64%), so a figure
+from either tool is comparable.
+
+Significance is paired per turn and grouped by conversation. Points inside one
+conversation share a speaker, a topic and a writing style; counting 334 turns
+as 334 independent observations would overstate n by two orders of magnitude.
+
+#### What it found
+
+On 666 messages from six real production conversations, replaying end to end:
+
+| | mean hard-information loss |
+|---|---|
+| the harness (verbatim tail + incremental summary) | **9.8%** |
+| this library, same context size, relevance ranking | 14.8% |
+| this library with `protect_user_messages=True` | **12.0%** |
+
+The gap was not uniform. Splitting it out by role showed it was almost entirely
+in **user turns**: at turn 88 of the longest conversation, 56.6% of the user
+messages' hard facts were gone from the context versus 18.3% for the harness,
+while overall loss differed by only 10 points. The harness ranks user messages
+ahead of everything and refuses to cut one in half — its own comment says
+*"dropping a user constraint removes the premise of the whole task"*. This
+library ranked them by relevance like everything else, so an early "the goal is
+X" that the current question happens not to mention was exactly the thing that
+got dropped.
+
+That is what `protect_user_messages` adds, and it is **off by default** because
+the rule is not universal: in a question-and-answer history the user turns *are*
+the questions and the answers live in the assistant turns, so promoting them
+costs more than it saves. Measured on the bundled development conversation,
+turning it on dropped key-fact retention from 84% to 72% (and to 12% at a
+stronger weight, which is why the weight is what it is). Turn it on when your
+user turns carry requirements.
+
 ### Scoring someone else's compressor
 
 If you already have a compressor, the useful question is not "is this library

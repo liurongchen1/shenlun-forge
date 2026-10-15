@@ -7,6 +7,36 @@ distribution versions on PyPI.
 
 ### Added
 
+- **`protect_user_messages`** on `compress()` / `compress_sync()` — rank user
+  turns ahead of the rest and never cut one in half. **Off by default.**
+
+  Found by replaying 666 messages from six real production agent conversations
+  turn by turn (`benchmarks/replay_curve.py`): the gap against the harness this
+  was compared with was almost entirely in *user turns* — at turn 88 of the
+  longest conversation, 56.6% of the user messages' hard facts were missing
+  from the context, against 18.3% for an implementation that protects them.
+  A user turn is usually a constraint the rest of the conversation depends on
+  ("the goal is X", "do not touch Y"), so ranking it by relevance to the current
+  question drops exactly the ones that matter most.
+
+  Off by default because the rule is not universal: in a question-and-answer
+  history the user turns *are* the questions and the answers live in the
+  assistant turns. Turning it on there cost key-fact retention on the bundled
+  development conversation (84% → 72%, or 12% at a stronger weight). Use it
+  when your user turns carry requirements.
+
+- **`benchmarks/replay_curve.py`** and **`benchmarks/replay_regression.py`** —
+  replay a whole conversation the way a live agent compresses it (compress the
+  history, append the turn, repeat), score how much *hard information* is still
+  visible at every turn, and fail a shell script when a change makes it worse.
+
+  Hard information means paths, URLs, IPs, ports, command lines, filenames,
+  numbers and config literals — no LLM judge, so it costs nothing, has no
+  variance, and gives the same answer twice. `--match-label` hands this run the
+  same context size the other implementation sent, turn by turn; without it the
+  comparison measured who was allowed to send more rather than who compresses
+  better.
+
 - **`qa_eval.py --external NAME=COMMAND`** — enter any other compressor into the
   same evaluation: same points, same frozen answer key, same judge, same
   budget. The command reads `{messages, query, maxTokens}` as JSON on stdin and

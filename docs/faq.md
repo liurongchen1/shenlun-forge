@@ -118,6 +118,33 @@ result.stats["dropped_tokens"]    # 12480
 A gap of `0` with `dropped_messages` present and `passthrough` set means the
 whole history really was in the prompt — nothing was hidden from the model.
 
+## Should I turn on `protect_user_messages`?
+
+It depends on what your user turns are, and the difference is measurable rather
+than a matter of taste.
+
+**On** when user turns carry *requirements* — "build X", "do not touch Y", "we
+ship Friday", a port, a path, a constraint. Those are not content competing for
+relevance with everything else; the rest of the conversation is *about* them.
+Ranking them by similarity to the current question drops exactly the ones the
+question does not mention, which are often the ones that still bind.
+
+**Off** (the default) when user turns are *questions*. In a question-and-answer
+history the answers live in the assistant turns, so promoting the questions
+costs more than it saves: on the conversation bundled with this repo, turning
+it on dropped key-fact retention from 84% to 72%.
+
+The numbers behind it come from replaying 666 messages of six real agent
+sessions turn by turn — see "Replaying a whole conversation" in
+`benchmarks/README.md`.
+
+```python
+result = forge.compress_sync(
+    messages=history, current_query=query, max_tokens=4000,
+    protect_user_messages=True,     # user turns are constraints here
+)
+```
+
 ## `simple` or `acs`?
 
 Ask whether your question and your answer share vocabulary.

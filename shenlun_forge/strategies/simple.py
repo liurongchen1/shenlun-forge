@@ -23,6 +23,22 @@ from ..types import (
 # conversation can crowd out the messages that actually answer the question.
 _QUERY_MATCH_BONUS = 0.5
 
+# User messages are *sometimes* constraints rather than content: "the goal is
+# X", "do not touch Y", "we ship on Friday". In that kind of conversation the
+# rest of the history is about them, so ranking them by relevance to the
+# current question is the wrong operation — an early constraint that nothing in
+# the current question mentions is exactly the one that must survive. Ranking
+# them like everything else lost 38 points more of their hard facts on 666 real
+# messages from six production conversations.
+#
+# It is not a universal rule, which is why it is not on by default. In a
+# question-and-answer history the user turns *are* the questions, and the answers
+# live in the assistant turns; promoting them there costs more than it saves
+# (measured: key-fact retention on the bundled development conversation fell
+# from 84% to 12% at a strong weight, and 72% at a weak one — below the old
+# behaviour either way). Turn it on when the user turns carry requirements.
+_USER_MESSAGE_BONUS = 0.35
+
 
 class SimpleStrategy:
     """Simple compression without LLM — uses rules and heuristics only.
@@ -77,6 +93,7 @@ class SimpleStrategy:
         max_tokens: int = 4000,
         budget_overflow: str = "keep",
         dropped_notice: bool = True,
+        protect_user_messages: bool = False,
         **kwargs,
     ) -> CompressionResult:
         """Compress using simple rules: dedup + priority + truncation.
@@ -95,6 +112,15 @@ class SimpleStrategy:
                 history was left out, in the language of the question. Without
                 it the model cannot tell "not there" apart from "never shown".
                 Measured effect: ``benchmarks/README.md``.
+            protect_user_messages: Rank user messages ahead of the rest and
+                never cut one in half. For conversations where user turns carry
+                requirements ("build X", "do not touch Y", "we ship Friday") —
+                those are constraints the rest of the history depends on, and
+                dropping the ones the current question does not happen to
+                mention changes the task rather than shortening the context.
+                Default ``False``: in a question-and-answer history the user
+                turns are the questions and the answers live in the assistant
+                turns, where this costs more than it saves.
 
         Returns:
             CompressionResult with compressed text and statistics.
@@ -156,6 +182,8 @@ class SimpleStrategy:
             shares_query_terms = bool(query_terms and (self._terms(block.content) & query_terms))
             if shares_query_terms:
                 score += _QUERY_MATCH_BONUS
+            if protect_user_messages and block.role == "user":
+                score += _USER_MESSAGE_BONUS
             scored.append((score, block, shares_query_terms))
         scored.sort(key=lambda pair: pair[0], reverse=True)
 
@@ -182,6 +210,10 @@ class SimpleStrategy:
                         compression_ratio=1.0,
                     ))
                     used_tokens += block_tokens
+                elif protect_user_messages and block.role == "user":
+                    # Half a constraint is worse than none. Skip this one and
+                    # let the budget go to blocks that do fit.
+                    continue
                 elif allow_truncate:
                     remaining = budget - used_tokens
                     if remaining > 20:
