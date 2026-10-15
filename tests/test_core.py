@@ -10,10 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shenlun_forge.types import (
     ContextBlock, TaskProfile, TaskType, InfoType, CompressionResult,
 )
-from shenlun_forge.analyzer import ShenlunAnalyzer
-from shenlun_forge.retriever import ShenlunRetriever
-from shenlun_forge.processor import ShenlunProcessor
-from shenlun_forge.formatter import ShenlunFormatter
+from shenlun_forge.analyzer import ACSAnalyzer
+from shenlun_forge.retriever import ACSRetriever
+from shenlun_forge.processor import ACSProcessor
+from shenlun_forge.formatter import ACSFormatter
 from shenlun_forge.compressor import ShenlunForge
 
 
@@ -21,25 +21,25 @@ class TestAnalyzer:
     """Test Step 1: Task Analysis."""
 
     def test_rule_based_qa_detection(self):
-        analyzer = ShenlunAnalyzer(llm=None, use_fast_path=True)
+        analyzer = ACSAnalyzer(llm=None, use_fast_path=True)
         messages = [ContextBlock(content="Hello", role="user")]
         profile = asyncio.run(analyzer.analyze(messages, "What is the database schema?"))
         assert profile.task_type == TaskType.QA
 
     def test_rule_based_summary_detection(self):
-        analyzer = ShenlunAnalyzer(llm=None, use_fast_path=True)
+        analyzer = ACSAnalyzer(llm=None, use_fast_path=True)
         messages = [ContextBlock(content="We discussed many things", role="user")]
         profile = asyncio.run(analyzer.analyze(messages, "Summarize our conversation"))
         assert profile.task_type == TaskType.SUMMARY
 
     def test_rule_based_code_detection(self):
-        analyzer = ShenlunAnalyzer(llm=None, use_fast_path=True)
+        analyzer = ACSAnalyzer(llm=None, use_fast_path=True)
         messages = [ContextBlock(content="Let me show you code", role="assistant")]
         profile = asyncio.run(analyzer.analyze(messages, "Write a function to sort"))
         assert profile.task_type == TaskType.CODE_GEN
 
     def test_fallback_to_conversation(self):
-        analyzer = ShenlunAnalyzer(llm=None, use_fast_path=True)
+        analyzer = ACSAnalyzer(llm=None, use_fast_path=True)
         messages = [ContextBlock(content="Hello", role="user")]
         profile = asyncio.run(analyzer.analyze(messages, "Hey there"))
         assert profile.task_type == TaskType.CONVERSATION
@@ -49,7 +49,7 @@ class TestRetriever:
     """Test Step 2: Information Retrieval."""
 
     def test_relevance_scoring(self):
-        retriever = ShenlunRetriever(llm=None)
+        retriever = ACSRetriever(llm=None)
         blocks = [
             ContextBlock(content="Database schema with PostgreSQL tables", role="assistant", msg_index=0),
             ContextBlock(content="Hello how are you", role="user", msg_index=1),
@@ -68,7 +68,7 @@ class TestRetriever:
         assert len(db_blocks) > 0
 
     def test_info_type_classification(self):
-        retriever = ShenlunRetriever(llm=None)
+        retriever = ACSRetriever(llm=None)
         block = ContextBlock(
             content="The error was caused by a missing database connection",
             role="assistant",
@@ -82,7 +82,7 @@ class TestProcessor:
     """Test Step 3: Information Processing."""
 
     def test_rule_based_merge(self):
-        processor = ShenlunProcessor(llm=None)
+        processor = ACSProcessor(llm=None)
         blocks = [
             ContextBlock(content="We chose PostgreSQL", role="user", msg_index=0, info_type=InfoType.FACT),
             ContextBlock(content="PostgreSQL is good for relational data", role="assistant", msg_index=1, info_type=InfoType.FACT),
@@ -94,7 +94,7 @@ class TestProcessor:
         assert len(groups) == 1
 
     def test_summary_label_extraction(self):
-        processor = ShenlunProcessor(llm=None)
+        processor = ACSProcessor(llm=None)
         blocks = [
             ContextBlock(
                 content="## Database Setup\nWe configured PostgreSQL with SQLAlchemy",
@@ -108,7 +108,7 @@ class TestProcessor:
         assert label == "Database Setup"
 
     def test_expression_normalization(self):
-        processor = ShenlunProcessor(llm=None)
+        processor = ACSProcessor(llm=None)
         result = processor._normalize_expressions("The app doesn't work, it's too slow")
         assert "non-functional" in result
         assert "performance degraded" in result
@@ -119,7 +119,7 @@ class TestFormatter:
 
     def test_sequential_format(self):
         from shenlun_forge.types import CompressedBlock
-        formatter = ShenlunFormatter()
+        formatter = ACSFormatter()
         blocks = [
             CompressedBlock(
                 content="Database: PostgreSQL with SQLAlchemy",
@@ -144,7 +144,7 @@ class TestFormatter:
 
     def test_budget_truncation(self):
         from shenlun_forge.types import CompressedBlock
-        formatter = ShenlunFormatter()
+        formatter = ACSFormatter()
         blocks = [
             CompressedBlock(
                 content="A" * 10000,  # Very long block

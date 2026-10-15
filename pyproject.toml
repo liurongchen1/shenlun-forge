@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "shenlun-forge"
-version = "0.2.2"
+dynamic = ["version"]
 description = "Task-driven context compression for LLM agents with analytical compression strategy"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [
     {name = "Liu Rongchen", email = "rederdan@coze.email"},
@@ -16,9 +17,15 @@ keywords = ["llm", "context", "compression", "agent", "acs"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
 ]
 dependencies = [
     "pydantic>=2.0",
@@ -28,9 +35,10 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 langchain = ["langchain-core>=0.1"]
+llamaindex = ["llama-index-core>=0.10"]
 embedding = ["fastembed>=0.3.0"]
 full = ["openai>=1.0", "langchain-core>=0.1", "anthropic>=0.20", "fastembed>=0.3.0"]
-dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "build>=1.0", "twine>=5.0"]
 
 [project.scripts]
 shenlun-forge = "shenlun_forge.cli:main"
@@ -38,6 +46,15 @@ shenlun-forge = "shenlun_forge.cli:main"
 [project.urls]
 Homepage = "https://github.com/liurongchen1/shenlun-forge"
 Repository = "https://github.com/liurongchen1/shenlun-forge"
+Documentation = "https://github.com/liurongchen1/shenlun-forge/tree/main/docs"
+Changelog = "https://github.com/liurongchen1/shenlun-forge/blob/main/CHANGELOG.md"
+Issues = "https://github.com/liurongchen1/shenlun-forge/issues"
 
 [tool.setuptools.packages.find]
 include = ["shenlun_forge*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "shenlun_forge._version.__version__"}
+
+[tool.setuptools.package-data]
+shenlun_forge = ["py.typed"]

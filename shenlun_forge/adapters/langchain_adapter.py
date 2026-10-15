@@ -55,8 +55,6 @@ class LangChainShenlunForge:
         Returns:
             Dict with compressed_text and metadata.
         """
-        import asyncio
-
         messages = input.get("messages", [])
         query = input.get("query", "")
         max_tokens = input.get("max_tokens", self.max_tokens)
@@ -64,11 +62,13 @@ class LangChainShenlunForge:
         # Handle LangChain message objects
         parsed_messages = self._parse_langchain_messages(messages)
 
-        result = asyncio.run(self.forge.compress(
+        # Use the sync wrapper: it manages the event loop and closes the LLM
+        # client for us.
+        result = self.forge.compress_sync(
             messages=parsed_messages,
             current_query=query,
             max_tokens=max_tokens,
-        ))
+        )
 
         return {
             "compressed_text": result.compressed_text,

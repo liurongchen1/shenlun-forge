@@ -9,20 +9,21 @@ This is the main entry point. It orchestrates the four-step compression pipeline
 from __future__ import annotations
 import asyncio
 import time
+import warnings
 from typing import Any, Optional
 
 from .types import (
     ContextBlock, CompressedBlock, TaskProfile, TaskType,
-    CompressionResult, InfoType,
+    CompressionResult, InfoType, MIN_TOKENS_TO_COMPRESS, MIN_COMPRESSION_GAIN,
+    split_recent_window, render_recent_blocks, validate_overflow_policy,
+    CompressionPlan, plan_compression,
 )
 from .base import LLMProvider, BaseAnalyzer, BaseRetriever, BaseProcessor, BaseFormatter
-from .llm import OpenAIProvider
+from .llm import OpenAIProvider, InstrumentedProvider, probe_llm
 from .analyzer import ACSAnalyzer
 from .retriever import ACSRetriever
 from .processor import ACSProcessor
 from .formatter import ACSFormatter
-
-
 class ShenlunForge:
     """
     Task-driven context compression engine.
@@ -62,10 +63,24 @@ class ShenlunForge:
                 base_url=base_url,
             )
 
+        # Probe once so we can tell the caller when the pipeline is about to
+        # silently degrade to rule-based compression.
+        self.llm_ready, self.llm_unavailable_reason = probe_llm(self.llm)
+        self._llm_stats = {"calls": 0, "failures": 0}
+
+        # Only hand a provider to the LLM-driven steps when it can actually be
+        # used. Otherwise let them take their rule-based paths directly rather
+        # than paying for a doomed request on every step.
+        active_llm = (
+            InstrumentedProvider(self.llm, self._llm_stats)
+            if self.llm_ready
+            else None
+        )
+
         # Set up pipeline components (default to ACS strategy)
-        self.analyzer = analyzer or ACSAnalyzer(llm=self.llm)
-        self.processor = processor or ACSProcessor(llm=self.llm)
-        self.formatter = formatter or ACSFormatter(llm=self.llm)
+        self.analyzer = analyzer or ACSAnalyzer(llm=active_llm)
+        self.processor = processor or ACSProcessor(llm=active_llm)
+        self.formatter = formatter or ACSFormatter(llm=active_llm)
 
         # Retriever: use provided instance, or create based on type
         if retriever is not None:
@@ -84,7 +99,8 @@ class ShenlunForge:
         task_type: Optional[str] = None,
         verbose: bool = False,
         lightweight: bool = False,
-        recent_window: int = 6,
+        recent_window: int = 0,
+        budget_overflow: str = "keep",
     ) -> CompressionResult:
         """
         Compress conversation context using the ACS 4-step pipeline.
@@ -98,25 +114,45 @@ class ShenlunForge:
             lightweight: If True, skip LLM-dependent steps (Analyze, Process).
                 Only Retrieve + Format runs. Requires EmbeddingRetriever.
                 Zero LLM API calls, but no compression — just smart selection.
+            recent_window: Number of trailing messages kept verbatim. Defaults
+                to ``max(3, len(messages) // 8)``, capped so it cannot claim
+                more than 40% of the budget.
+            budget_overflow: What to do when the protected recent messages do
+                not fit in the remaining budget.
+
+                - ``"keep"`` (default): keep them whole and let the result
+                  exceed ``max_tokens``. The newest turns carry the live task
+                  state, so losing them is usually worse than overshooting a
+                  budget. The overshoot is reported as
+                  ``stats["over_budget"]``.
+                - ``"truncate"``: treat ``max_tokens`` as a hard limit, trimming
+                  the newest message if necessary. Cheaper to reason about when
+                  you are metering cost or the target model's window; costs you
+                  the tail of the most recent turn. Reported as
+                  ``stats["recent_truncated"]``.
 
         Returns:
             CompressionResult with compressed text and statistics.
         """
+        validate_overflow_policy(budget_overflow)
         start_time = time.time()
         steps_log = {}
+        recent_truncated = False
+
+        # Per-call LLM instrumentation (reset so stats describe this run only)
+        self._llm_stats["calls"] = 0
+        self._llm_stats["failures"] = 0
 
         # Convert raw messages to ContextBlocks
         context_blocks = self._parse_messages(messages)
         original_tokens = sum(b.token_count for b in context_blocks)
 
-        # Recent window protection: keep last N messages uncompressed
-        recent_window_size = min(recent_window, len(context_blocks))
-        if recent_window_size > 0 and len(context_blocks) > recent_window_size:
-            early_blocks = context_blocks[:-recent_window_size]
-            recent_blocks = context_blocks[-recent_window_size:]
-        else:
-            early_blocks = context_blocks
-            recent_blocks = []
+        # Recent-message protection: the newest turns are kept verbatim, but
+        # the window shrinks so it cannot eat the whole budget (see
+        # split_recent_window).
+        early_blocks, recent_blocks = split_recent_window(
+            context_blocks, max_tokens, recent_window
+        )
 
         if lightweight:
             # ── Lightweight mode: no LLM calls ──────────────────────────
@@ -151,8 +187,23 @@ class ShenlunForge:
                 )
                 for b in relevant_blocks
             ]
-            # Append recent window blocks as uncompressed
+            steps_log["step3_process"] = {"skipped": "lightweight mode"}
+
+            # Step 4: Format (early blocks only — recent blocks bypass formatter)
+            recent_tokens = sum(b.token_count for b in recent_blocks) if recent_blocks else 0
+            task_profile.token_budget = max(max_tokens - recent_tokens, max_tokens // 4)
+            step_start = time.time()
+            compressed_text = await self.formatter.format(compressed_blocks, task_profile)
+
+            # Step 4b: Append the protected recent messages
             if recent_blocks:
+                remaining = max_tokens - self.llm.count_tokens(compressed_text)
+                appended, truncated = render_recent_blocks(
+                    recent_blocks, remaining, budget_overflow
+                )
+                if appended:
+                    compressed_text = compressed_text + appended
+                recent_truncated = recent_truncated or truncated
                 for b in recent_blocks:
                     compressed_blocks.append(CompressedBlock(
                         content=b.content,
@@ -162,11 +213,7 @@ class ShenlunForge:
                         preserved_token_count=b.token_count,
                         compression_ratio=1.0,
                     ))
-            steps_log["step3_process"] = {"skipped": "lightweight mode"}
 
-            # Step 4: Format (concatenate + truncate to budget)
-            step_start = time.time()
-            compressed_text = await self.formatter.format(compressed_blocks, task_profile)
             compressed_tokens = self.llm.count_tokens(compressed_text)
             steps_log["step4_format"] = {
                 "duration_ms": round((time.time() - step_start) * 1000),
@@ -212,8 +259,23 @@ class ShenlunForge:
                 "merged_count": len(relevant_blocks) - len(compressed_blocks),
             }
 
-            # Step 3b: Append recent window blocks as uncompressed
+            # Step 3b: Reserve token budget for recent window blocks
+            recent_tokens = sum(b.token_count for b in recent_blocks) if recent_blocks else 0
+            task_profile.token_budget = max(max_tokens - recent_tokens, max_tokens // 4)
+
+            # Step 4: Format within token budget (early blocks only — recent bypass formatter)
+            step_start = time.time()
+            compressed_text = await self.formatter.format(compressed_blocks, task_profile)
+
+            # Step 4b: Append the protected recent messages
             if recent_blocks:
+                remaining = max_tokens - self.llm.count_tokens(compressed_text)
+                appended, truncated = render_recent_blocks(
+                    recent_blocks, remaining, budget_overflow
+                )
+                if appended:
+                    compressed_text = compressed_text + appended
+                recent_truncated = recent_truncated or truncated
                 for b in recent_blocks:
                     compressed_blocks.append(CompressedBlock(
                         content=b.content,
@@ -224,14 +286,44 @@ class ShenlunForge:
                         compression_ratio=1.0,
                     ))
 
-            # Step 4: Format within token budget
-            step_start = time.time()
-            compressed_text = await self.formatter.format(compressed_blocks, task_profile)
             compressed_tokens = self.llm.count_tokens(compressed_text)
             steps_log["step4_format"] = {
                 "duration_ms": round((time.time() - step_start) * 1000),
                 "output_tokens": compressed_tokens,
             }
+
+        # ── Passthrough guard ────────────────────────────────────────
+        # Only return a compressed payload when it actually saves tokens.
+        # Short conversations can otherwise come out longer than they went
+        # in, so fall back to the original text untouched.
+        passthrough = False
+        if original_tokens == 0 or (
+            original_tokens > 0
+            and (
+                original_tokens < MIN_TOKENS_TO_COMPRESS
+                # It already fits: compressing can only lose information and
+                # save nothing the caller asked for.
+                or original_tokens <= max_tokens
+                or compressed_tokens >= original_tokens * (1 - MIN_COMPRESSION_GAIN)
+            )
+        ):
+            compressed_text = "\n".join(b.content for b in context_blocks)
+            # The output is the original context, so report its token count
+            # rather than re-measuring: re-tokenizing can shift boundaries
+            # and push the ratio above 1.0 for a no-op compression.
+            compressed_tokens = original_tokens
+            compressed_blocks = [
+                CompressedBlock(
+                    content=b.content,
+                    original_indices=[b.msg_index],
+                    summary_label=b.role,
+                    info_type=b.info_type,
+                    preserved_token_count=b.token_count,
+                    compression_ratio=1.0,
+                )
+                for b in context_blocks
+            ]
+            passthrough = True
 
         # Build result
         result = CompressionResult(
@@ -246,11 +338,54 @@ class ShenlunForge:
                 "original_blocks": len(context_blocks),
                 "relevant_blocks": len(relevant_blocks),
                 "compressed_groups": len(compressed_blocks),
+                "llm_available": self.llm_ready,
+                "llm_calls": self._llm_stats["calls"],
+                "llm_failures": self._llm_stats["failures"],
+                "degraded": self._is_degraded(),
+                "degraded_reason": self._degradation_reason(),
+                "passthrough": passthrough,
+                # True when a real compression still came out over budget —
+                # surfaced rather than hidden, since max_tokens is a promise.
+                # A couple of tokens of slack: labels, separators and
+                # re-tokenisation boundaries always cost something.
+                "over_budget": (not passthrough)
+                and compressed_tokens > max_tokens * 1.02,
+                # Only ever True under budget_overflow="truncate": the newest
+                # message could not be kept whole.
+                "recent_truncated": recent_truncated,
             },
             steps_log=steps_log if verbose else {},
         )
 
         return result
+
+    def _is_degraded(self) -> bool:
+        """True when this run did not actually use the LLM as configured."""
+        return (not self.llm_ready) or self._llm_stats["failures"] > 0
+
+    def _degradation_reason(self) -> str:
+        """Human-readable explanation for ``stats['degraded']``."""
+        if not self.llm_ready:
+            return self.llm_unavailable_reason
+        if self._llm_stats["failures"]:
+            return (
+                f"{self._llm_stats['failures']} LLM call(s) failed at runtime; "
+                "rule-based fallback was used"
+            )
+        return ""
+
+    def plan(
+        self,
+        messages: list[dict[str, str]],
+        model_window: int = 128_000,
+        safety_margin: float = 0.1,
+    ) -> CompressionPlan:
+        """Decide whether to compress at all, and with how much budget.
+
+        Convenience wrapper around :func:`shenlun_forge.types.plan_compression`,
+        which you can also call directly (it needs no instance and no LLM).
+        """
+        return plan_compression(messages, model_window, safety_margin)
 
     def compress_sync(
         self,
@@ -259,8 +394,26 @@ class ShenlunForge:
         max_tokens: int = 4000,
         **kwargs,
     ) -> CompressionResult:
-        """Synchronous wrapper for compress()."""
-        return asyncio.run(self.compress(messages, current_query, max_tokens, **kwargs))
+        """Synchronous wrapper for compress().
+
+        Each call runs in its own event loop, so the LLM client is closed
+        before that loop goes away — otherwise httpx reports a closed loop on
+        every subsequent call.
+        """
+
+        async def _run() -> CompressionResult:
+            try:
+                return await self.compress(messages, current_query, max_tokens, **kwargs)
+            finally:
+                await self._aclose_llm()
+
+        return asyncio.run(_run())
+
+    async def _aclose_llm(self) -> None:
+        """Close the LLM client, if the provider supports it."""
+        closer = getattr(self.llm, "aclose", None)
+        if closer is not None:
+            await closer()
 
     def _parse_messages(self, messages: list[dict[str, str]]) -> list[ContextBlock]:
         """Convert raw message dicts to ContextBlocks."""
@@ -292,7 +445,7 @@ class ShenlunForge:
     @classmethod
     def create(
         cls,
-        strategy: str = "acs",
+        strategy: str = "simple",
         model: str = "deepseek-chat",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
@@ -306,24 +459,53 @@ class ShenlunForge:
 
         Args:
             strategy: Compression strategy name. Use list_strategies() to see available options.
-                - "acs": Full 4-step ACS pipeline (default)
-                - "simple": Simple truncation (no LLM needed)
-                - "hcs": ACS + verbatim code augmentation
+                - "simple": Rule-based selection (default). No LLM, no API key,
+                  runs in milliseconds.
+                - "acs": Full 4-step ACS pipeline. Requires an LLM.
+                - "hcs": ACS + verbatim code augmentation. Requires an LLM.
             model: LLM model name.
             api_key: API key for the LLM.
             base_url: Base URL for the LLM API.
+
+        Note:
+            Strategies that need an LLM ("acs", "hcs") emit a warning when no
+            usable LLM is configured, because they would otherwise degrade to
+            rule-based compression without telling you.
         """
         from .registry import get_strategy_class
-        
+
         strategy_cls = get_strategy_class(strategy)
-        
+
         # ShenlunForge (acs) takes model/api_key/base_url directly
         if strategy_cls is cls:
-            return cls(model=model, api_key=api_key, base_url=base_url)
+            obj = cls(model=model, api_key=api_key, base_url=base_url, **kwargs)
         else:
             # SimpleStrategy, HCSCompressor, etc.
             try:
-                return strategy_cls(model=model, api_key=api_key, base_url=base_url)
+                obj = strategy_cls(
+                    model=model, api_key=api_key, base_url=base_url, **kwargs
+                )
             except TypeError:
                 # SimpleStrategy takes no args
-                return strategy_cls()
+                if kwargs:
+                    warnings.warn(
+                        f"strategy='{strategy}' ignores the extra options "
+                        f"{sorted(kwargs)}; they only apply to the LLM "
+                        "strategies ('acs', 'hcs').",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                obj = strategy_cls()
+
+        if getattr(obj, "llm_ready", True) is False:
+            warnings.warn(
+                f"strategy='{strategy}' needs an LLM, but "
+                f"{getattr(obj, 'llm_unavailable_reason', 'no usable LLM is available')}. "
+                "Compression will fall back to rule-based mode. "
+                'Install it with pip install "shenlun-forge[openai]" and set an '
+                "API key, or use strategy='simple' to avoid calling an LLM.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        return obj

@@ -1,0 +1,277 @@
+{
+  "id": "real_dev_conversation",
+  "language": "mixed (zh-CN + en)",
+  "description": "shenlun-forge 框架开发真实对话（中英混杂、跨话题、代码密集）",
+  "characteristics": [
+    "中英混杂（技术术语英文，讨论中文）",
+    "跨话题跳转（框架↔论文↔CSDN↔部署）",
+    "代码细节密集（类名、方法名、文件路径、配置项）",
+    "包含决策推理（为什么选A不选B）",
+    "时间线和待办穿插",
+    "实验数据密集（多轮实验结果对比）"
+  ],
+  "conversation": [
+    {
+      "role": "system",
+      "content": "你是一个资深AI系统架构师，帮助开发者构建LLM上下文压缩框架。要求给出完整可运行的代码，解释关键设计决策。"
+    },
+    {
+      "role": "user",
+      "content": "我在做一个LLM上下文压缩框架，叫 shenlun-forge，准备发布到PyPI。核心思路是用申论方法论指导LLM上下文压缩——分析、分类、处理、格式化四步走。\n\n技术栈：Python 3.8+，依赖 tiktoken 做token计数，LLM调用走 OpenAI 兼容接口（默认 DeepSeek）。\n\n框架的 pipeline 是四步：\n1. Analyzer（分析器）：分析用户query和对话历史，输出 TaskProfile\n2. Classifier（分类器）：给每个消息块打标签（fact/action/problem/cause/effect_pos/effect_neg/opinion/data）\n3. Processor（处理器）：合并同类项、提取总括词、规范化表达\n4. Formatter（格式化器）：按output_logic组织最终输出\n\n帮我搭建基础框架代码。"
+    },
+    {
+      "role": "assistant",
+      "content": "框架代码搭建完成，核心文件结构：\n\n```\nshenlun_forge/\n├── __init__.py          # 导出 ShenlunForge 主类\n├── compressor.py        # ShenlunForge 主入口，串联四步pipeline\n├── types.py             # 数据模型：TaskProfile, ContextBlock, CompressedBlock, InfoType枚举\n├── base.py              # 抽象基类：BaseAnalyzer, BaseClassifier, BaseProcessor, BaseFormatter\n├── analyzer.py          # ACSAnalyzer：LLM驱动的task分析\n├── classifier.py        # ACSClassifier：基于规则的info_type分类\n├── processor.py         # ACSProcessor：合并+标注+规范化\n├── formatter.py         # ACSFormatter：输出格式化\n├── llm.py               # OpenAIProvider：LLM调用封装\n└── strategies/\n    ├── simple.py        # SimpleStrategy：纯规则压缩\n    └── hybrid.py        # HCSCompressor：混合策略（规则+LLM双引擎）\n```\n\n关键设计：\n- ShenlunForge 继承 BaseCompressor，compress() 方法串联 Analyzer→Classifier→Processor→Formatter\n- LLM调用走 OpenAIProvider.complete_json()，底层用 AsyncOpenAI.chat.completions.create()\n- 默认模型 deepseek-chat，base_url: https://api.deepseek.com/v1\n- InfoType 枚举包含 9 种类型：fact, action, problem, cause, effect_pos, effect_neg, opinion, data, other\n- TaskProfile 包含 task_type, key_elements, priority_rules, classification_dimension, output_logic\n- pyproject.toml 中 name=\"shenlun-forge\", version=\"0.2.0\""
+    },
+    {
+      "role": "user",
+      "content": "框架搭好了。我需要设计实验来验证压缩效果。思路是：\n1. 构造一段多轮对话（模拟真实开发场景）\n2. 针对对话设计多个查询场景，每个场景列出关键事实（key_facts）\n3. 用4种策略压缩：不压缩（baseline）、截断（保留后6条）、滑动窗口（4000 token）、Shenlun Simple、Shenlun LLM、Hybrid双引擎\n4. 评估指标：事实保留率（key_facts命中率）+ 压缩率（token节省百分比）\n\n实验文件放 experiments/ 目录，用 run_batch_experiments.py 作为主脚本。\n\n注意 experiments/ 目录不能推到Git，里面有API Key硬编码。"
+    },
+    {
+      "role": "assistant",
+      "content": "第一轮英文实验结果（6个场景，69个关键事实）：\n\n| 场景 | Shenlun | Hybrid | Simple | Sliding |\n|------|---------|--------|--------|--------|\n| Fact Recall | 15/16 | 16/16 | 12/16 | 9/16 |\n| Code Detail | 2/10 | 1/10 | 8/10 | 1/10 |\n| Architecture | 14/15 | 14/15 | 11/15 | 6/15 |\n| Tasks/Timeline | 2/10 | 3/10 | 10/10 | 10/10 |\n| Security | 0/10 | 2/10 | 2/10 | 0/10 |\n| Rejected | 4/8 | 6/8 | 2/8 | 0/8 |\n| **合计** | **37/69 (53.6%)** | **42/69 (60.9%)** | **45/69 (65.2%)** | **26/69 (37.7%)** |\n\n问题分析：\n1. Code Detail 和 Security 严重失分——LLM merge 把具体代码细节（函数名、变量名、错误码）概括成了抽象描述\n2. Tasks/Timeline 也很差——LLM把任务列表和deadline概括成了'有几个待办事项'\n3. Simple策略反而比Shenlun LLM好，说明LLM合并反而在丢信息\n\n核心结论：当前MERGE_PROMPT太激进，LLM在合并时丢失了大量关键实体和细节。"
+    },
+    {
+      "role": "user",
+      "content": "问题很清楚了。我们需要做两件事：\n\n第一，加一个关键实体保护机制。在Processor合并前，先用正则提取所有关键实体（代码标识符、常量名、API路径、技术术语、版本号、时间表达式、文件名等），合并后检查这些实体是否还在压缩结果里，缺失的补回来。\n\n第二，优化MERGE_PROMPT。加一个CRITICAL段，明确告诉LLM不能把以下内容概括掉：\n1. 任务项和截止时间（TODO、deadline、milestone）\n2. 代码级细节（函数名、变量名、类名、API端点、文件路径、配置项）\n3. 具体数字和标识符（版本号、端口号、错误码、枚举值、常量名）\n\n这两项先做，做完跑实验验证。这两项完成后版本号升到0.2.1。"
+    },
+    {
+      "role": "assistant",
+      "content": "关键实体保护机制已实现，在 processor.py 中新增：\n\n1. _extract_entities() 方法：15种中英双语正则提取模式\n   - snake_case标识符（如 is_active, check_deadlines）\n   - SCREAMING_SNAKE_CASE常量（如 JWT_SECRET, HS256）\n   - API路由/文件路径（如 /payments/webhook）\n   - 全大写技术术语（如 JWT, API, R2）\n   - CamelCase（如 nextAuthService）\n   - PascalCase（如 SignatureVerificationError）\n   - 产品名带点号（如 Next.js, shadcn/ui）\n   - 时间表达式（如 9:00, 9:00 AM）\n   - 数字+单位（如 3 days, 50MB）\n   - 版本号（如 v0.2.2, 2.0.0）\n   - 文件名带扩展名（如 processor.py, config.json）\n   - 中文数字+量词（如 3天, 5个模块, 200行）\n   - 中文引号内容（如 \"认证机制\", 「用户模块」）\n   - 中文序数词（如 第一步, 第二阶段）\n   - 中英混合技术术语（如 JWT认证, API接口）\n\n2. _preserve_entities() 方法：合并后检查实体保留率，低于70%则注入缺失实体\n   - 按长度降序排列（更长的实体更具体，优先保留）\n   - 最多注入30个实体，避免膨胀\n   - 注入格式：[关键术语保留] entity1, entity2, ...\n\n3. process() 方法更新：\n   - Step 3-pre: 提取实体\n   - Step 3a: 合并\n   - Step 3b: 构建压缩块\n   - Step 3-post: 注入缺失实体\n\n同时更新了 MERGE_PROMPT，增加 CRITICAL 段落。"
+    },
+    {
+      "role": "user",
+      "content": "第二轮实验结果（加了实体保护 + prompt优化）：\n\n| 场景 | Shenlun | Hybrid | Simple | Sliding |\n|------|---------|--------|--------|--------|\n| Fact Recall | 15/16 | 16/16 | 12/16 | 9/16 |\n| Code Detail | 2/10 | 1/10 | 8/10 | 1/10 |\n| Architecture | 14/15 | 14/15 | 11/15 | 6/15 |\n| Tasks/Timeline | 4/10 | 3/10 | 10/10 | 10/10 |\n| Security | 2/10 | 2/10 | 2/10 | 0/10 |\n| Rejected | 6/8 | 6/8 | 2/8 | 0/8 |\n| **合计** | **43/69 (62.3%)** | **42/69 (60.9%)** | **45/69 (65.2%)** | **26/69 (37.7%)** |\n\n提升不大。Tasks/Timeline 从2/10到4/10，Security 还是2/10。实体保护有作用但不够——问题是LLM在合并阶段就已经把信息丢了，后面补回来的是零散术语，上下文关系丢了。\n\nCode Detail 还是2/10，这个场景需要专门的代码处理策略。"
+    },
+    {
+      "role": "user",
+      "content": "跑了第三轮，结果：\n\nShenlun 46/69 (66.7%)，Tasks/Timeline 提到 5/10，Security 还是 2/10。\n\nPrompt的CRITICAL段有效果但有限。我觉得问题出在LLM merge本身就是双刃剑——它能让相关内容更紧凑，但也会丢细节。对于时序类内容（任务、时间线），LLM特别容易把具体的deadline和任务项概括成抽象描述。\n\n需要一个新的策略：不是所有维度都用同一种merge方式。时序类内容应该走保守路线，甚至跳过LLM merge。"
+    },
+    {
+      "role": "assistant",
+      "content": "同意，需要维度驱动的差异化压缩策略。我设计了v0.3优化方案：\n\n**P0 - Analyzer 分类维度检测** ✅\n- analyzer.py 新增 DIMENSION_KEYWORDS，5个维度：temporal/causal/layer/spatial/element\n- 纯关键词匹配，不经过LLM，零开销\n- 结果写入 TaskProfile.classification_dimension\n\n**P1 - output_logic 检测** ✅  \n- 类似逻辑，检测输出组织方式：temporal/causal/progressive/parallel\n- 写入 TaskProfile.output_logic\n\n**P12 - Processor 维度路由**\n- temporal维度（流程/步骤/时间线）：跳过LLM merge，走规则合并（_rule_based_merge）\n- layer/causal维度（架构/因果）：用增强版 TERM_PRESERVING_MERGE_PROMPT，合并后校验术语保留率，<50%则fallback\n- 其他维度（auto/spatial/element）：走默认LLM merge\n\n**P-Code - 代码去脂肪**（下一步）\n- 提取代码块中的关键标识符，去掉冗余注释和空行\n- 跨消息代码去重\n\n**P2-P5 - Retriever 四因子增强**\n- 首因效应加权、词频加权、权威来源加权、结构位置加权\n\n**P6-P8 - Processor 质量增强**\n- 共性识别、因果链提取、质量检查\n\n**P9-P11 - Formatter 结构化输出**\n- output_logic排序、维度分组、头部标注\n\n先做 P0+P1+P12+实体保护+Prompt优化作为第一批，做完跑实验验证。"
+    },
+    {
+      "role": "user",
+      "content": "第四轮实验结果（实体保护+prompt优化，P12之前的基线）：\n\n| 场景 | Shenlun | Hybrid | Simple | Sliding |\n|------|---------|--------|--------|--------|\n| Fact Recall | 15/16 | 16/16 | 12/16 | 9/16 |\n| Code Detail | 2/10 | 1/10 | 8/10 | 1/10 |\n| Architecture | 14/15 | 14/15 | 11/15 | 6/15 |\n| Tasks/Timeline | 6/10 | 3/10 | 10/10 | 10/10 |\n| Security | 2/10 | 2/10 | 2/10 | 0/10 |\n| Rejected | 6/8 | 6/8 | 2/8 | 0/8 |\n| **合计** | **60/69 (87.0%)** | **58/69 (84.1%)** | **45/69 (65.2%)** | **26/69 (37.7%)** |\n\nTasks/Timeline 从5/10提到6/10，有进步但不大。Security 还是2/10。\n\n另外跑了中文加长版实验（~16724 tokens），结果很有意思：\n\n| 场景 | Shenlun | Hybrid | Simple | Sliding |\n|------|---------|--------|--------|--------|\n| 事实回忆 | 15/16 | 12/16 | 16/16 | 14/16 |\n| 代码细节 | 5/10 | 5/10 | 5/10 | 2/10 |\n| 架构概览 | 15/15 | 14/15 | 14/15 | 13/15 |\n| 任务时间线 | 10/10 | 0/10 | 10/10 | 10/10 |\n| 安全分析 | 10/10 | 1/10 | 10/10 | 10/10 |\n| 被否决方案 | 8/8 | 2/8 | 8/8 | 8/8 |\n| **合计** | **63/69 (91.3%)** | **31/69 (44.9%)** | **63/69 (91.3%)** | **57/69 (82.6%)** |\n\n重大发现：\n1. Shenlun中文91.3% > 英文87.0%，中文表现更好\n2. Hybrid中文全面崩溃（44.9%），Tasks 0/10、Security 1/10——LLM merge对中文有害\n3. Simple中文91.3% = Shenlun中文，说明对中文内容Shenlun的规则部分已经足够好"
+    },
+    {
+      "role": "assistant",
+      "content": "P12 维度路由已实现，只改了 processor.py：\n\n1. process() 方法新增维度路由逻辑：\n   - dimension = getattr(task_profile, 'classification_dimension', 'auto')\n   - temporal → _rule_based_merge()（保守压缩，跳过LLM）\n   - layer/causal → _term_preserving_merge()（术语保留模式）\n   - 其他 → _merge_blocks()（默认LLM merge）\n\n2. 新增 TERM_PRESERVING_MERGE_PROMPT：\n   - 专门为架构/因果内容设计\n   - 强调保留所有技术标识符、API端点、协议名、端口号\n   - 要求保留因果关系链（X导致Y，Z依赖W）\n   - BAD/GOOD示例引导\n\n3. 新增 _term_preserving_merge() 方法：\n   - 用增强prompt调用LLM\n   - 合并后校验术语保留率（_extract_entities提取原始实体，检查在合并文本中是否还存在）\n   - 保留率 < 50% 则 fallback 到 _rule_based_merge()\n\n维度映射说明：\n- Analyzer 的 DIMENSION_KEYWORDS 输出 temporal/spatial/causal/layer/element\n- temporal 对应任务/时间线类查询（如'待办任务''项目进度'）→ 保守压缩\n- layer 对应架构类查询（如'系统架构''模块结构'）→ 术语保留\n- causal 对应因果类查询（如'为什么''原因分析'）→ 术语保留\n- auto/spatial/element → 默认策略\n\n维度检测不需要调LLM，纯关键词匹配，零开销。"
+    },
+    {
+      "role": "user",
+      "content": "第一批优化算完成了，帮我写一篇CSDN宣传文章。面向使用框架的技术大牛，开发者实录风格，数据公开，不要太AI味。标题用v0.2.3优化实录。"
+    },
+    {
+      "role": "assistant",
+      "content": "CSDN文章已完成，保存在 docs/csdn_v0.3_optimization_results.md。\n\n文章结构：\n1. 开头：开发者视角介绍shenlun-forge是什么\n2. 问题暴露：第一轮实验数据（53.6%），坦诚说LLM merge在丢信息\n3. 优化方案：实体保护机制（15种正则模式）+ Prompt优化（CRITICAL段）\n4. 优化效果：数据对比（53.6% → 87.0%），中文实验发现（Hybrid对中文有害）\n5. 下一步：P12维度路由、代码去脂肪等\n\n文章特点：第一人称、有具体数据、不回避问题、面向技术人群。"
+    },
+    {
+      "role": "user",
+      "content": "几个事情要处理：\n1. 版本号改为0.2.3（增量修复，不到0.3.0架构级）\n2. pyproject.toml 里 version = \"0.2.3\"\n3. GitHub仓库已经改名为 shenlun-forge：https://github.com/liurongchen1/shenlun-forge\n4. Gitee仓库：https://gitee.com/liu-rongchen/shenlun-forge\n5. PyPI的 twine upload 我稍后自己执行\n6. experiments/ 目录不能推到Git（有API Key硬编码）"
+    },
+    {
+      "role": "assistant",
+      "content": "整理一下当前状态和后续计划：\n\n**已完成：**\n- v0.2.0 → v0.2.1 → v0.2.3 版本迭代\n- 关键实体保护机制（15种正则模式）\n- MERGE_PROMPT CRITICAL段优化\n- 中文/英文双语实验验证\n- CSDN宣传文章发布\n- GitHub/Gitee仓库改名并推送\n\n**当前批次（P12）：**\n- 维度路由代码已完成\n- 等待实验验证\n\n**后续批次：**\n1. P-Code（代码去脂肪+跨消息去重）→ 目标：Code Detail 10%→45-55%\n2. P2-P5（Retriever四因子增强）→ 目标：全局+2.5-3.5%\n3. P6-P8（Processor质量增强）→ 目标：全局+2-3%\n4. P9-P11（Formatter结构化输出）→ 目标：全局+3-3.5%\n\n**其他待办：**\n- PyPI上传v0.2.3\n- 论文《计算机工程与设计》投稿（等框架优化完成后更新实验数据）\n- 数据清洗工具构想（已记录，暂缓）\n\n**论文信息：**\n- 投稿目标：《计算机工程与设计》（北大核心+统计源）\n- 官网：https://www.china-ced.com\n- 论文定位：根在中国（申论方法论），西方理论（Polya/Kahneman/Manning）作为佐证\n- 必须通过查重和AI生成内容检测"
+    },
+    {
+      "role": "user",
+      "content": "突然想到一个方向：shenlun-forge能不能升级成非结构化数据清洗归类工具？不只是做LLM上下文压缩，而是通用的非结构化数据清洗和分类。\n\n比如企业里有大量非结构化内容——客服对话记录、工单备注、会议纪要、邮件往来——需要清洗、分类、提取关键信息。\n\n这个方向后续再讨论，先记下来。"
+    },
+    {
+      "role": "assistant",
+      "content": "已记录到 recent_memory/todo/shenlun_forge_data_cleaning_tool.md。\n\n构想核心：将shenlun-forge从LLM上下文压缩框架升级为通用非结构化数据清洗归类工具。目标场景包括客服对话记录清洗、工单备注分类、会议纪要提取、邮件往来整理等。需要讨论的关键问题：产品定位、输入输出格式、数据规模、分类维度定义。\n\n当前优先级：先完成框架v0.3优化，再推进这个方向。"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "real_q1_version_recall",
+      "name": "版本与配置回忆",
+      "query": "shenlun-forge目前的版本号是多少？发布在哪些平台？技术栈是什么？",
+      "key_facts": [
+        "0.2.3",
+        "shenlun-forge",
+        "PyPI",
+        "GitHub",
+        "Gitee",
+        "Python 3.8",
+        "tiktoken",
+        "DeepSeek",
+        "deepseek-chat",
+        "https://api.deepseek.com/v1",
+        "liurongchen1",
+        "liu-rongchen",
+        "twine",
+        "pyproject.toml"
+      ]
+    },
+    {
+      "id": "real_q2_architecture",
+      "name": "框架架构细节",
+      "query": "shenlun-forge的四步pipeline是什么？每个步骤对应哪个类？关键的数据模型有哪些？",
+      "key_facts": [
+        "Analyzer",
+        "Classifier",
+        "Processor",
+        "Formatter",
+        "ShenlunForge",
+        "TaskProfile",
+        "ContextBlock",
+        "CompressedBlock",
+        "InfoType",
+        "BaseCompressor",
+        "OpenAIProvider",
+        "complete_json",
+        "compressor.py",
+        "analyzer.py",
+        "processor.py",
+        "formatter.py",
+        "classification_dimension",
+        "output_logic"
+      ]
+    },
+    {
+      "id": "real_q3_entity_protection",
+      "name": "实体保护机制",
+      "query": "关键实体保护机制是怎么实现的？支持哪些提取模式？保留率阈值是多少？",
+      "key_facts": [
+        "_extract_entities",
+        "_preserve_entities",
+        "snake_case",
+        "SCREAMING_SNAKE_CASE",
+        "CamelCase",
+        "PascalCase",
+        "15",
+        "70%",
+        "30",
+        "JWT_SECRET",
+        "HS256",
+        "/payments/webhook",
+        "v0.2.2",
+        "processor.py",
+        "正则",
+        "fallback"
+      ]
+    },
+    {
+      "id": "real_q4_experiment_data",
+      "name": "实验数据回忆",
+      "query": "英文实验和中文实验分别是什么结果？Shenlun和Hybrid各场景表现如何？有什么关键发现？",
+      "key_facts": [
+        "87.0%",
+        "91.3%",
+        "44.9%",
+        "53.6%",
+        "69",
+        "Tasks/Timeline",
+        "Security",
+        "Code Detail",
+        "LLM merge对中文有害",
+        "Simple中文91.3%",
+        "16724",
+        "4000",
+        "62.3%",
+        "66.7%",
+        "Hybrid中文崩溃"
+      ]
+    },
+    {
+      "id": "real_q5_optimization_plan",
+      "name": "优化计划与决策",
+      "query": "v0.3的优化方案包含哪些批次？每个批次的目标是什么？P12的维度路由具体怎么工作的？",
+      "key_facts": [
+        "P0",
+        "P1",
+        "P12",
+        "P-Code",
+        "P2-P5",
+        "P6-P8",
+        "P9-P11",
+        "temporal",
+        "causal",
+        "layer",
+        "spatial",
+        "element",
+        "DIMENSION_KEYWORDS",
+        "_rule_based_merge",
+        "_term_preserving_merge",
+        "TERM_PRESERVING_MERGE_PROMPT",
+        "50%",
+        "零开销",
+        "关键词匹配"
+      ]
+    },
+    {
+      "id": "real_q6_paper_and_future",
+      "name": "论文与未来规划",
+      "query": "论文投哪里？有什么要求？后续还有哪些待办事项？数据清洗工具构想是什么？",
+      "key_facts": [
+        "计算机工程与设计",
+        "北大核心",
+        "统计源",
+        "china-ced.com",
+        "查重",
+        "AI生成内容检测",
+        "Polya",
+        "Kahneman",
+        "Manning",
+        "申论",
+        "数据清洗",
+        "非结构化",
+        "客服对话",
+        "工单",
+        "会议纪要",
+        "北京鸿韵律动文化传播有限公司",
+        "思湃德"
+      ]
+    },
+    {
+      "id": "real_q7_code_detail",
+      "name": "代码级细节",
+      "query": "processor.py中process方法的完整流程是什么？维度路由的判断逻辑是什么？",
+      "key_facts": [
+        "process",
+        "classification_dimension",
+        "temporal",
+        "layer",
+        "causal",
+        "_rule_based_merge",
+        "_term_preserving_merge",
+        "_merge_blocks",
+        "_extract_entities",
+        "_preserve_entities",
+        "Step 3-pre",
+        "Step 3a",
+        "Step 3b",
+        "Step 3-post",
+        "getattr",
+        "auto",
+        "50%",
+        "processor.py"
+      ]
+    },
+    {
+      "id": "real_q8_causal_reasoning",
+      "name": "因果推理",
+      "query": "为什么Hybrid策略在中文场景崩溃了？为什么Simple策略中文表现和Shenlun一样好？P12的temporal路由是为了解决什么问题？",
+      "key_facts": [
+        "LLM merge对中文有害",
+        "44.9%",
+        "0/10",
+        "1/10",
+        "temporal",
+        "保守压缩",
+        "跳过LLM merge",
+        "规则合并",
+        "deadline",
+        "任务列表",
+        "概括成抽象描述",
+        "91.3%",
+        "Simple中文",
+        "规则部分已经足够好",
+        "双刃剑"
+      ]
+    }
+  ]
+}

@@ -52,8 +52,9 @@ async def main():
     print(f"   Estimated tokens: ~{original_tokens}")
     print(f"   Characters: {len(original_text)}")
 
-    # Create compressor (using rule-based mode for demo, no API key needed)
-    forge = ShenlunForge.create(strategy="acs")
+    # 'simple' needs no API key and no network. Pass strategy="acs" together
+    # with an API key to run the full LLM-driven pipeline instead.
+    forge = ShenlunForge.create(strategy="simple")
 
     # Compress with the user's query
     current_query = "What did we decide for the database and auth setup?"
@@ -76,6 +77,9 @@ async def main():
     print(f"   Compressed tokens: ~{result.compressed_tokens}")
     print(f"   Compression ratio: {result.compression_ratio:.1%}")
     print(f"   Blocks merged: {result.stats.get('compressed_groups', '?')} groups from {result.stats.get('relevant_blocks', '?')} relevant blocks")
+    print(f"   LLM used: {result.stats.get('llm_available')}   degraded: {result.stats.get('degraded')}")
+    if result.stats.get("passthrough"):
+        print("   Note: nothing was gained, the original context was returned unchanged.")
 
     print(f"\nStep-by-step log:")
     for step_name, step_data in result.steps_log.items():

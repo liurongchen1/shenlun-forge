@@ -1,398 +1,433 @@
 # ShenlunForge
 
-**面向 LLM Agent 的任务驱动型上下文压缩库**
-**Task-Driven Context Compression for LLM Agents**
+**Task-driven context compression for LLM agents.**
 
-*一个轻量级 Python 库，在将对话上下文发送给 LLM 之前进行智能压缩，灵感来源于结构化分析方法论。*
-*A lightweight Python library that intelligently compresses conversation context before sending it to LLMs, inspired by structured analytical methodology.*
+Your agent's history keeps growing. ShenlunForge takes the message list you were
+about to send to the model and returns a smaller one that keeps what the
+*current question* needs — not a blind truncation, and not a generic summary.
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+```python
+from shenlun_forge import ShenlunForge
+
+forge = ShenlunForge.create()                 # rule-based, no API key
+result = forge.compress_sync(messages=history, current_query=question, max_tokens=800)
+
+print(result.compressed_text)                 # send this instead
+```
+
+[![PyPI](https://img.shields.io/pypi/v/shenlun-forge.svg)](https://pypi.org/project/shenlun-forge/)
+[![Python](https://img.shields.io/pypi/pyversions/shenlun-forge.svg)](https://pypi.org/project/shenlun-forge/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/liurongchen1/shenlun-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/liurongchen1/shenlun-forge/actions/workflows/ci.yml)
+
+English · [简体中文](README.zh-CN.md)
 
 ---
 
-## 为什么选择 ShenlunForge？ / Why ShenlunForge?
+## Who this is for
 
-LLM Agent 面临**上下文溢出**问题——随着对话增长，完整历史会超出 token 限制或变得过于昂贵。现有方案（截断、简单摘要、滑动窗口）会丢失关键信息，或在无关内容上浪费 token。
-LLM agents suffer from **context overflow** — as conversations grow, the full history exceeds token limits or becomes too expensive. Existing solutions (truncation, simple summarization, sliding windows) lose critical information or waste tokens on irrelevant content.
+- **Agent developers** whose `messages` list no longer fits the context window,
+  or costs more than it should. Compress before each model call, for the
+  question you are about to ask.
+- **Anyone with a long conversation to shrink** and no interest in paying for
+  an API to do it. The rule-based strategy is local, free and runs in
+  milliseconds.
+- **Chinese and mixed Chinese/English conversations**, where word-boundary
+  tokenizers and English-tuned compressors tend to do badly.
 
-**ShenlunForge 采用不同的方法**：它像专家分析师处理信息一样对待上下文压缩——首先理解*需要什么*，然后只提取相关事实，将重复内容合并并加上描述性标签，最后在严格的 token 预算内格式化输出。
-**ShenlunForge takes a different approach**: it treats context compression like an expert analyst processing information — first understanding *what's needed*, then extracting only relevant facts, merging duplicates with descriptive labels, and formatting everything within a strict token budget.
-
-## 核心创新：ACS 四阶段流水线 / The Innovation: ACS Four-Stage Pipeline
-
-ShenlunForge 将**结构化分析方法论**映射到 LLM 上下文管理，形成四阶段分析压缩策略（Analytical Compression Strategy, ACS）：
-ShenlunForge maps a proven structured analytical methodology to LLM context management, forming a four-stage Analytical Compression Strategy (ACS):
-
-| 阶段 / Stage | ShenlunForge 模块 / Module | 功能 / What It Does |
-|-----------|-------------------|--------------|
-| **分析** (Analyze) | `ACSAnalyzer` | 理解当前任务，确定哪些信息重要 / Understands the current task and determines what information matters |
-| **检索** (Retrieve) | `ACSRetriever` | 从完整上下文中查找并评分相关信息 / Finds and scores relevant information from the full context |
-| **处理** (Process) | `ACSProcessor` | 合并重复项，提取摘要标签，规范化表达 / Merges duplicates, extracts summary labels, normalizes expressions |
-| **格式化** (Format) | `ACSFormatter` | 在 token 预算内输出结构化压缩文本 / Outputs structured, compressed text within token budget |
-
-### 差异化对比 / What Makes This Different?
-
-| 特性 / Feature | ShenlunForge | 简单摘要 / Simple Summary | 滑动窗口 / Sliding Window | RAG |
-|---------|:-----------:|:--------------:|:--------------:|:---:|
-| 任务感知压缩 / Task-aware compression | ✅ | ❌ | ❌ | ❌ |
-| 层级合并 / Hierarchical merging | ✅ | ❌ | ❌ | 部分 / Partial |
-| 摘要标签 / Summary labels | ✅ | ❌ | ❌ | ❌ |
-| 硬性 token 预算 / Hard token budget | ✅ | ❌ | ✅ | ❌ |
-| 表达规范化 / Expression normalization | ✅ | ❌ | ❌ | ❌ |
-| 无需额外索引 / No extra retrieval index | ✅ | ✅ | ✅ | ❌ |
-
-## 安装 / Installation
+## Install
 
 ```bash
-# 基础安装（包含 tiktoken 用于精确 token 计数）
-# Basic installation (includes tiktoken for accurate token counting)
 pip install shenlun-forge
-
-# 含 OpenAI 兼容 API 支持（推荐用于 LLM 驱动策略）
-# With OpenAI-compatible API support (recommended for LLM-powered strategies)
-pip install shenlun-forge[openai]
-
-# 含 LangChain 适配器
-# With LangChain adapter
-pip install shenlun-forge[langchain]
-
-# 完整安装（所有可选依赖）
-# Full installation (all optional dependencies)
-pip install shenlun-forge[full]
-
-# 开发安装
-# Development installation
-pip install shenlun-forge[dev]
 ```
 
-## 快速开始 / Quick Start
-
-### Python API
-
-```python
-import asyncio
-from shenlun_forge import ShenlunForge
-
-async def main():
-    # 初始化 LLM 提供者 / Initialize with your LLM provider
-    forge = ShenlunForge(
-        model="deepseek-chat",
-        api_key="your-api-key",
-        base_url="https://api.deepseek.com/v1",
-    )
-
-    # 对话历史 / Conversation history
-    messages = [
-        {"role": "user", "content": "I'm building a restaurant app with FastAPI."},
-        {"role": "assistant", "content": "Great! Let's use FastAPI with SQLAlchemy..."},
-        # ... 更多消息 / more messages ...
-    ]
-
-    # 为当前查询压缩上下文 / Compress context for the current query
-    result = await forge.compress(
-        messages=messages,
-        current_query="What database did we decide on?",
-        max_tokens=4000,
-    )
-
-    print(result.compressed_text)
-    print(f"压缩率 / Compression ratio: {result.compression_ratio:.1%}")
-    print(f"节省 token / Token savings: {result.original_tokens - result.compressed_tokens} tokens")
-
-asyncio.run(main())
-```
-
-### 选择策略 / Choosing a Strategy
-
-```python
-from shenlun_forge import ShenlunForge
-
-# ACS 全量分析流水线（需要 LLM，最佳质量）
-# Full ACS pipeline (requires LLM, best quality)
-forge = ShenlunForge.create(strategy="acs", model="deepseek-chat", api_key="...")
-
-# 简单策略（无需 LLM，基于规则，最快速）
-# Simple strategy (no LLM needed, rule-based, fastest)
-forge = ShenlunForge.create(strategy="simple")
-
-# HCS 混合策略（ACS + 逐字代码块，最适合编码任务）
-# HCS hybrid strategy (ACS + verbatim code blocks, best for coding tasks)
-forge = ShenlunForge.create(strategy="hcs", model="deepseek-chat", api_key="...")
-```
-
-### CLI 用法 / CLI Usage
+That covers the rule-based strategy and the CLI. Extras:
 
 ```bash
-# 压缩 JSON 消息文件 / Compress a JSON messages file
-shenlun-forge compress --messages messages.json \
-    --query "What did we decide about the database?" \
-    --strategy acs \
-    --max-tokens 4000 \
-    --api-key "sk-..." \
-    --base-url "https://api.deepseek.com/v1"
-
-# 从 stdin 读取消息 / Read messages from stdin
-echo '[{"role":"user","content":"Hello"}]' | \
-    shenlun-forge compress --stdin --strategy simple --query "Summary"
-
-# 使用环境变量配置凭据 / Use environment variables for credentials
-export SHENLUN_FORGE_API_KEY="sk-..."
-export SHENLUN_FORGE_BASE_URL="https://api.deepseek.com/v1"
-export SHENLUN_FORGE_MODEL="deepseek-chat"
-shenlun-forge compress --messages chat.json --query "Recap" --verbose
-
-# 保存输出到文件 / Save output to file
-shenlun-forge compress -m messages.json -q "Summary" -o result.json
-
-# 列出可用策略 / List available strategies
-shenlun-forge strategies
-
-# 显示版本 / Show version
-shenlun-forge version
+pip install "shenlun-forge[openai]"      # 'acs' / 'hcs' strategies
+pip install "shenlun-forge[langchain]"   # LangChain adapter
+pip install "shenlun-forge[llamaindex]"  # llama-index message compatibility
+pip install "shenlun-forge[embedding]"   # local embedding retrieval
+pip install "shenlun-forge[full]"        # everything
 ```
 
-**CLI 输出格式 / CLI output format：**
-```json
-{
-  "compressed_text": "...",
-  "original_tokens": 12500,
-  "compressed_tokens": 3200,
-  "compression_ratio": 0.256,
-  "stats": {
-    "strategy": "acs",
-    "total_duration_ms": 2340,
-    "original_messages": 30,
-    "relevant_blocks": 18,
-    "compressed_groups": 8
-  }
-}
-```
+Python 3.9+.
 
-### LangChain 集成 / With LangChain
+## 30 seconds, no API key
 
 ```python
-from shenlun_forge.adapters.langchain_adapter import LangChainShenlunForge
+from shenlun_forge import ShenlunForge
 
-forge = LangChainShenlunForge(
-    model="deepseek-chat",
-    api_key="your-key",
-    max_tokens=4000,
+history = [
+    {"role": "user", "content": "Which database should we use for bookings?"},
+    {"role": "assistant", "content": "For the database: PostgreSQL. We ruled out MongoDB."},
+    {"role": "user", "content": "And how do we send the confirmation email?"},
+    {"role": "assistant", "content": "Resend, with a template per language."},
+    # ... 40 more turns ...
+]
+
+forge = ShenlunForge.create()          # 'simple' is the default
+result = forge.compress_sync(
+    messages=history,
+    current_query="Which database did we settle on?",
+    max_tokens=500,
 )
 
-# 作为可调用组件集成到流水线中 / Use as a callable in your pipeline
-result = forge.invoke({
-    "messages": chat_history,
-    "query": current_question,
-})
-
-# 或作为回调处理器自动压缩 / Or as a callback handler for automatic compression
-handler = forge.as_callback_handler()
+print(result.compression_ratio)        # 0.31 — 69% of the tokens gone
+print(result.compressed_text)
 ```
 
-## 架构 / Architecture
+Or from the shell:
 
-```
-shenlun_forge/
-├── __init__.py          # 公共 API 导出 / Public API exports
-├── types.py             # 数据模型 / Data models (ContextBlock, TaskProfile, InfoType, etc.)
-├── base.py              # 抽象基类 / Abstract base classes
-├── llm.py               # LLM 提供者 / LLM provider (OpenAI-compatible)
-├── analyzer.py          # 阶段 1: 任务分析 / Step 1: Task analysis (ACSAnalyzer)
-├── retriever.py         # 阶段 2: 信息提取 / Step 2: Information extraction (ACSRetriever)
-├── processor.py         # 阶段 3: 合并与规范化 / Step 3: Merge & normalize (ACSProcessor)
-├── formatter.py         # 阶段 4: Token 预算格式化 / Step 4: Token-budget formatting (ACSFormatter)
-├── compressor.py        # 主编排器 / Main orchestrator (ShenlunForge class)
-├── registry.py          # 策略注册表 / Strategy registry for extensibility
-├── cli.py               # 命令行接口 / Command-line interface
-├── strategies/
-│   ├── __init__.py
-│   ├── simple.py        # 规则回退（无需 LLM）/ Rule-based fallback (no LLM)
-│   └── hybrid.py        # ACS + 逐字代码增强 / ACS + verbatim code augmentation (HCSCompressor)
-└── adapters/
-    ├── __init__.py
-    └── langchain_adapter.py  # LangChain 集成 / LangChain integration
+```bash
+shenlun-forge compress --messages chat.json --query "Which database did we settle on?"
 ```
 
-## 工作原理 / How It Works
+More: [`docs/quickstart.md`](docs/quickstart.md) ·
+[`examples/quickstart_no_llm.py`](examples/quickstart_no_llm.py)
 
-### 阶段 1：分析 — 任务解析 / Step 1: Analyze — Task Analysis
+## When to use which strategy
 
-ACSAnalyzer 检查当前查询和对话，确定以下信息：
-The ACSAnalyzer examines the current query and conversation to determine:
+| Your situation | Strategy | Why |
+|---|---|---|
+| Long history, the answer needs reasoning across messages | `acs` | Reads the query, keeps what answers it |
+| Code-heavy history, exact identifiers matter | `hcs` ⚠️ | ACS summary **plus** verbatim code blocks — but measured as no better than the free options, see below |
+| Want savings with no API key | `simple` (default) | Pure rules, local, milliseconds |
+| Timelines, task lists, configs, structured data | `simple` | Rules keep discrete items intact |
+| Question and answer share no vocabulary | `acs` | Keyword matching cannot bridge "app drains fast" → "BMS bug" |
+| You only need the last N turns | nothing | Truncation is simpler and free |
+| You need retrieval over many documents | RAG, not this | Different problem |
 
-- **任务类型 / Task type**：QA、代码生成、分析、创意写作等 / QA, code generation, analysis, creative, etc.
-- **关键要素 / Key elements**：需要哪些具体信息 / What specific information is needed
-- **优先级权重 / Priority weights**：每类信息的重要程度 / How important each type of information is
-- **输出格式 / Output format**：顺序、结构化或要点列表 / Sequential, structured, or bullet points
+The short version: **`simple` is a fast filter, `acs` is a reader.** If your
+query and your history share words, `simple` is usually enough. If the answer is
+scattered and phrased differently from the question, you want `acs`.
 
-当 LLM 不可用时，快速规则分类器使用关键词匹配作为回退。
-When LLM is unavailable, a fast rule-based classifier uses keyword matching as fallback.
+Full reasoning in [`docs/scenarios.md`](docs/scenarios.md).
 
-### 阶段 2：检索 — 信息提取 / Step 2: Retrieve — Information Extraction
+## With an LLM
 
-ACSRetriever 基于 6 个维度对每条消息块评分：
-The ACSRetriever scores every message block based on 6 dimensions:
-
-1. **关键词相关性 / Keyword relevance**：与当前查询的匹配度 / Match to current query
-2. **信息类型 / Information type**：事实、动作、问题、数据等 / Facts, actions, problems, data, etc.
-3. **时效性 / Recency**：较新消息通常更相关 / Newer messages generally more relevant
-4. **角色重要性 / Role importance**：工具结果 > 用户指令 > 助手解释 / Tool results > user instructions > assistant explanations
-5. **信号词 / Signal words**："but"、"therefore"、"important" 等
-6. **内容密度 / Content density**：代码、表格、结构化数据得分更高 / Code, tables, structured data score higher
-
-### 阶段 3：处理 — 核心创新 / Step 3: Process — Core Innovation
-
-ACSProcessor 执行三个关键操作：
-The ACSProcessor performs three key operations:
-
-1. **合并同类项 / Merge duplicates**：语义相似的块被分组 / Semantically similar blocks are grouped
-2. **提炼摘要标签 / Extract labels**：每组获得一个简洁的 2-6 字符标签 / Each group gets a concise 2-6 character label
-3. **规范化表达 / Normalize**：非正式语言转为技术表达 / Informal language is converted to technical expressions
-
-### 阶段 4：格式化 — 输出 / Step 4: Format — Formatted Output
-
-ACSFormatter 完成以下工作：
-The ACSFormatter:
-
-- 按相关性和信息类型排列块优先级 / Prioritizes blocks by relevance and information type
-- 在 token 预算内贪心填充最高优先级内容 / Greedily fills the token budget with highest-priority content
-- 按任务配置格式化输出（顺序、结构化或要点）/ Formats output according to the task profile
-- 预算紧张时优雅截断 / Truncates gracefully when budget is tight
-
-## 基准测试结果 / Benchmark Results
-
-### 单场景对比（5 种策略）/ Single-Scenario Comparison (5 Strategies)
-
-| 策略 / Strategy | 事实保留 / Facts Retained | 压缩率 / Compression Ratio | 说明 / Notes |
-|----------|:---:|:---:|-------|
-| **Full ACS** | 100% | 58% | 最佳事实保留，强压缩 / Best fact retention with strong compression |
-| HCS | 100% | 65% | 混合内容良好平衡 / Good balance for mixed content |
-| Direct LLM | 80% | 45% | 简单摘要，丢失细节 / Simple summarization, loses details |
-| Sliding Window | 70% | 75% | 完全丢失早期上下文 / Loses early context entirely |
-| Simple (no LLM) | 60% | 50% | 快速但质量较低 / Fast but low quality |
-
-### 6 场景批量实验 / 6-Scenario Batch Experiment
-
-| 场景 / Scenario | Full ACS | HCS | Simple | Sliding Window |
-|----------|:---:|:---:|:---:|:---:|
-| 安全分析 / Security Analysis | **10/10** | 2/10 | 0/10 | 0/10 |
-| 被拒方案 / Rejected Alternatives | **8/8** | 7/8 | 2/8 | 2/8 |
-| 代码细节 / Code Detail | 1/10 | 1/10 | 1/10 | 1/10 |
-| 事实回忆 / Fact Recall | **16/16** | 15/16 | 12/16 | 12/16 |
-| 架构设计 / Architecture | **13/15** | 13/15 | 11/15 | 11/15 |
-| 任务/时间线 / Tasks/Timeline | 7/10 | 2/10 | **10/10** | **10/10** |
-
-### 消融研究（5 个变体 × 6 场景）/ Ablation Study (5 Variants × 6 Scenarios)
-
-| 变体 / Variant | 说明 / Description | 平均得分 / Avg Score |
-|---------|-------------|:---------:|
-| **Full ACS** | 完整四阶段流水线 / Complete 4-step pipeline | **最高 / Highest overall** |
-| HCS | ACS + 逐字代码 / ACS + verbatim code | 代码密集任务最佳 / Best for code-heavy tasks |
-| Direct-Only | 仅 LLM 摘要 / LLM summarization only | 中等表现 / Moderate performance |
-| Analyze-Only | 分析+检索（跳过合并/格式化）/ Analyze + Extract (skip merge/format) | 事实回忆良好 / Good for factual recall |
-| Simple | 纯规则驱动 / Pure rule-based | 最快速，质量最低 / Fastest, lowest quality |
-
-### 关键发现 / Key Findings
-
-- **Full ACS** 在推理和事实回忆任务中占优（6 个场景中 4 个最佳）/ dominates in reasoning and fact recall tasks (4/6 scenarios best)
-- **HCS** 在需要精确保留代码块时表现出色 / excels when code blocks need exact preservation
-- **Simple** 在时间线/顺序任务中出人意料地有效（无 LLM 成本！）/ surprisingly effective for timeline/sequential tasks (no LLM cost!)
-- 代码细节保留是所有策略的共同挑战 / Code detail retention is a universal challenge across all strategies
-
-## 配置 / Configuration
-
-### LLM 提供者 / LLM Provider
+`acs` and `hcs` need an OpenAI-compatible endpoint — DeepSeek, OpenAI, Groq,
+vLLM, Ollama's OpenAI shim, anything.
 
 ```python
-from shenlun_forge import OpenAIProvider
-
-# 兼容任何 OpenAI 兼容 API / Works with any OpenAI-compatible API
-provider = OpenAIProvider(
-    model="deepseek-chat",        # 或 / or "gpt-4o", "claude-3-haiku", etc.
+forge = ShenlunForge.create(
+    strategy="acs",
+    model="deepseek-chat",
     api_key="sk-...",
     base_url="https://api.deepseek.com/v1",
-    temperature=0.1,               # 低温度保证分析一致性 / Low temperature for consistent analysis
-    max_tokens=4096,
 )
-```
 
-### 自定义组件 / Custom Components
-
-```python
-from shenlun_forge import ShenlunForge
-from shenlun_forge.analyzer import ACSAnalyzer
-from shenlun_forge.retriever import ACSRetriever
-
-forge = ShenlunForge(
-    analyzer=ACSAnalyzer(llm=provider, use_fast_path=True),
-    retriever=ACSRetriever(llm=provider, min_score_threshold=0.2),
-    # 使用默认处理器和格式化器 / Use default processor and formatter
-)
-```
-
-### 任务类型 / Task Types
-
-```python
-from shenlun_forge import TaskType
-
-# 强制指定任务类型（跳过自动检测）
-# Force a specific task type (skip auto-detection)
 result = await forge.compress(
-    messages=messages,
-    current_query="Fix this bug",
-    task_type="code_gen",  # 强制代码聚焦压缩 / Forces code-focused compression
+    messages=history,
+    current_query="What security measures did we implement?",
     max_tokens=4000,
 )
 ```
 
-### 添加自定义策略 / Adding Custom Strategies
+`hcs` adds verbatim code retention on top, for histories where a summarised
+`verify_password` is worse than no summary at all.
 
-扩展策略注册表以添加自定义压缩策略：
-Extend the strategy registry to add your own compression strategies:
+See [`examples/compress_before_llm.py`](examples/compress_before_llm.py) and
+[`docs/integration.md`](docs/integration.md).
+
+## Should you compress at all?
+
+Compression is lossy, so the first question is whether it is needed. Answering
+that is free — no API key, no LLM call, no instance:
 
 ```python
-# 在代码中或通过猴子补丁 / In your code or via monkey-patching
-from shenlun_forge.registry import get_strategy_class
+from shenlun_forge import plan_compression
 
-# 注册表是懒加载的，可以在导入时添加条目
-# The registry is lazy-loaded, so you can add entries at import time
+plan = plan_compression(messages=history, model_window=128_000)
+
+if plan.fits_in_window:
+    send(history)                                  # nothing to do
+else:
+    result = await forge.compress(
+        messages=history,
+        current_query=query,
+        max_tokens=plan.recommended_max_tokens,    # the whole usable window
+    )
 ```
 
-## 依赖要求 / Requirements
+`plan.advice` states the decision in a sentence. The reason to ask first: in
+our measurements, a tight budget costs a large share of questions outright and
+quality keeps improving as the budget grows, so there is rarely a reason to
+compress below what the window allows.
 
-- Python 3.9+
-- `pydantic>=2.0` — 数据验证和模型 / Data validation and models
-- `tiktoken>=0.5.0` — 精确 token 计数 / Accurate token counting
-- 可选 / Optional: `openai>=1.0` — OpenAI 兼容 LLM 提供者 / OpenAI-compatible LLM provider
-- 可选 / Optional: `langchain-core>=0.1` — LangChain 适配器集成 / LangChain adapter integration
+`ShenlunForge.plan()` is the same thing as a method, if you already have an
+instance.
 
-## 研究背景 / Research Background
+## Reading the result
 
-本方法受结构化分析方法论启发，该方法论要求：
-This approach is inspired by structured analytical methodology, where analysts must:
+```python
+result.compressed_text          # the string you send to the model
+result.original_tokens          # tokens in
+result.compressed_tokens        # tokens out
+result.compression_ratio        # compressed / original
+result.blocks                   # survivors, with source indices
 
-1. 理解问题要求 / Understand the question requirements
-2. 从冗长材料中提取相关事实 / Extract relevant facts from lengthy materials
-3. 合并重复项并添加摘要标签 / Merge duplicates and add summary labels
-4. 在严格的字数限制内呈现 / Present within strict word limits
+result.stats["passthrough"]     # True = nothing was gained, original returned
+result.stats["degraded"]        # True = did not run as configured
+result.stats["degraded_reason"] # why
+result.stats["llm_calls"]       # LLM requests made
+result.stats["llm_failures"]    # how many failed
+```
 
-我们对 21 个代表性上下文压缩系统（2023-2026）的学术调研发现，**现有系统均不同时具备**以下四个特征：
-Our academic survey of 21 representative context compression systems (2023-2026) found that **no existing system** combines all four of these features:
+Three behaviours are deliberate and worth knowing up front:
 
-- 任务驱动压缩策略 / Task-driven compression strategy
-- 语义去重的层级合并 / Hierarchical merging with semantic deduplication
-- 显式摘要标签提取 / Explicit summary label extraction
-- 硬性 token 预算执行 / Hard token budget enforcement
+- **`max_tokens` is a ceiling, not a target.** If four messages relate to your
+  query, you get four. Padding the context with unrelated chatter would make it
+  worse, not better.
+- **A no-op returns the original.** If the history is under 200 tokens, or
+  compression would save less than 5%, you get your input back untouched with
+  `passthrough: True`. Returning something *longer* than the input would be
+  worse than returning it unchanged.
+- **The newest turn wins ties.** If the final message alone would blow the
+  budget, the default keeps it whole — losing the live turn is usually worse
+  than overshooting — and says so via `over_budget: True`. When `max_tokens` is
+  a hard limit (you meter cost by it, or the target model's window is exactly
+  that size), pass `budget_overflow="truncate"`: it trims the newest message to
+  fit and reports `recent_truncated: True`. Either way the choice is explicit
+  and visible in the result.
 
-最接近的工作包括 GraphRAG（层级但基于图）、SUPO（任务驱动但仅 RL）和 HTSIR（层级但基于文档结构）。
-The closest works are GraphRAG (hierarchical but graph-based), SUPO (task-driven but RL-only), and HTSIR (hierarchical but document-structure-based).
+## CLI
 
-## 许可证 / License
+```bash
+# Rule-based, no key (default)
+shenlun-forge compress --messages chat.json --query "What did we decide?"
 
-MIT 许可证 — 详见 LICENSE 文件 / MIT License — see LICENSE file for details.
+# Read from stdin, write structured output
+cat chat.json | shenlun-forge compress --stdin --query "Recap" -o out.json
 
-## 引用 / Citation
+# LLM-powered, with credentials from the environment
+export SHENLUN_FORGE_API_KEY="sk-..."
+export SHENLUN_FORGE_BASE_URL="https://api.deepseek.com/v1"
+shenlun-forge compress -m chat.json -q "What security measures did we implement?" -s acs -v
+
+shenlun-forge strategies
+shenlun-forge version
+
+# Measure whether compression helps on your own conversations
+shenlun-forge eval --conversations ./my-chats --strategies truncate,simple
+```
+
+## How it works
+
+The LLM pipeline (`acs`) is a four-stage compression pass modeled on how an
+analyst handles source material:
+
+| Stage | What it does |
+|---|---|
+| **Analyze** | Reads the question, decides which kinds of information matter |
+| **Retrieve** | Scores every message — query overlap, information type, recency, role, signal words, density |
+| **Process** | Merges duplicates, attaches a short label to each group, preserves identifiers (function names, constants, paths, `3 days`-style constraints) |
+| **Format** | Greedily fills the token budget, highest priority first |
+
+The rule-based path (`simple`) uses the same retrieval scoring without any LLM
+call, then fills the budget with the messages that relate to the query. Both
+paths always keep the most recent turns verbatim — that is where the live task
+state lives.
+
+Chinese is matched with 2-character n-grams and English terms are weighted by
+rarity (IDF) across the conversation, with cross-lingual bridging so a Chinese
+question can find the English identifiers that answer it.
+
+## Evaluation
+
+Reproducible with [`benchmarks/run_benchmark.py`](benchmarks/run_benchmark.py):
+a mixed Chinese/English development conversation (18 messages, ~5.4k tokens),
+8 question sets, 132 answer facts, 1200-token budget. Fact retention = share of
+the answer key found in the compressed text.
+
+| Strategy | Facts retained | Retention |
+|----------|---------------|-----------|
+| No compression (upper bound) | 129/132 | 97.7% |
+| Truncate last 6 | 38/132 | 28.8% |
+| Sliding window | 38/132 | 28.8% |
+| `simple` (rules) | **111/132** | **84.1%** |
+| `acs` (LLM) | 72/132 | 54.5% |
+| `hcs` (LLM + code) | 68/132 | 51.5% |
+
+Read that table carefully, because it says something inconvenient: **on literal
+fact retention the free, rule-based strategy beats the LLM pipeline.** This is
+not a bug. `simple` keeps messages verbatim, so every identifier it retains
+matches the answer key exactly; `acs` merges and rewrites, which a substring
+check cannot credit. The LLM pipeline earns its cost elsewhere — on questions
+whose wording never appears in the conversation, where earlier internal
+experiments showed the opposite ordering.
+
+So: **start with `simple`,** and reach for `acs` when you can watch it fail on
+paraphrase-heavy questions. Per-scenario breakdown and the caveats are in
+[`benchmarks/README.md`](benchmarks/README.md).
+
+## Does it actually help the model answer?
+
+Fact retention measures wording, not usefulness. We also run a
+question-answering evaluation: compress the history, ask a model to answer using
+**only** the compressed text, and score the answer against what was actually
+correct. `benchmarks/qa_eval.py`; details and caveats in
+[`benchmarks/README.md`](benchmarks/README.md).
+
+Whether you see a difference depends on whether your data contains one.
+
+**On a real agent workload** (131 points, 12 conversations, 3k–69k tokens) the
+strategies tie at a 4000-token budget — 39.8% for `simple` against 39.3% for
+naive truncation. The answers in that data sit near the end of the history, so
+keeping the recent tail is already close to optimal.
+
+**On [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned)**
+(public, MIT licensed — ~100k tokens of history per question, the answer buried
+in one of ~48 sessions, 96 independent questions) at a 16,000-token budget:
+
+| Retriever | Correct |
+|-----------|---------|
+| Naive truncation | 19.8% |
+| `simple` (keyword matching) | 30.2% |
+| **`embedding` (semantic, `retriever_type="embedding"`)** | **44.8%** |
+
+All three differences are significant (McNemar p = 0.021, 0.0094, < 0.001).
+**Changing the retriever moves the result further than any tuning knob in this
+library** — further than the token budget, the merge policy, or the
+recent-message share, all of which we measured as noise. Semantic retrieval is
+also the only configuration that scores at all on temporal-reasoning questions
+(25%, against 0% for both alternatives).
+
+By question type:
+
+| Question type | truncate | keyword | embedding |
+|---------------|----------|---------|-----------|
+| Recall what the assistant said | 19% | 25% | **62%** |
+| Temporal reasoning | 0% | 0% | **25%** |
+| Knowledge update ("my current X?") | 75% | 62% | **81%** |
+| Cross-session | 12% | 19% | **38%** |
+| Recall what the **user** said | 12% | **69%** | 56% |
+
+Which gives a more useful set of rules than "it compresses well":
+
+- **Long history, need to find something stated earlier** → use
+  `retriever_type="embedding"`. This is the case it wins big.
+- **Questions quoting the user's own words** → keyword matching is still better
+  (69% vs 56%); lexical overlap is a strong signal there.
+- **Don't compress when the newest value is the answer.** For "what is my
+  current X?" questions truncation is cheaper and better than keyword matching.
+- **Short conversations** → the rule-based path is far faster and the
+  difference disappears.
+
+On 67 points from real Chinese work conversations the picture is flat
+(truncation 51.0%, keyword 46.5%, embeddings 48.4%; nothing significant). That
+is not a contradiction: in a normal work conversation the answer sits near the
+end, where truncation is already optimal, so there is nothing for a retriever
+to win. The rule that holds in both experiments: **retrieval pays off in
+proportion to how far the answer is from the end of the history.**
+
+## What it costs
+
+Accuracy without a price tag is not a decision. Measured on a 100k-token
+history with a 16k budget (`benchmarks/cost_benchmark.py`):
+
+| Strategy | Median latency | Output tokens | LLM calls |
+|---|---|---|---|
+| truncate | **5 ms** | 15,900 | 0 |
+| `simple` | **41 ms** | 6,519 | 0 |
+| `embedding` | **109 ms** | 9,607 | 0 |
+| `acs` | 3,298 ms | 9,579 | 1 |
+| `hcs` | 3,801 ms | 6,519 | 0 |
+
+The free paths are milliseconds; the LLM strategies are seconds. Note that
+semantic retrieval costs about **60 ms** more than keyword matching —
+negligible next to a single model call. "Embeddings are expensive" is not a good
+reason to skip them.
+
+## Measure it on your own conversations
+
+Every number here comes from one dataset, and the main lesson of building them
+was that the answer depends on your data: on ordinary work conversations
+compression ties with truncation, while on long histories with the answer buried
+early it wins by 25 points. Nobody can tell you which case you are in — so the
+library measures it:
+
+```bash
+shenlun-forge eval --conversations ./my-chats --strategies truncate,simple,embedding
+```
+
+```
+从 20 个对话构建测试（提取答案要点需要模型调用）...
+得到 84 个测试点，开始评测...
+
+Accuracy by strategy (budget 16000 tokens, n=84 points):
+  embedding             44.1%
+  simple                30.6%
+  truncate              21.4%
+
+Best: embedding. Treat differences under ~5 points as noise ...
+```
+
+Or from Python:
+
+```python
+from shenlun_forge import OpenAIProvider, build_eval_set, evaluate
+
+llm = OpenAIProvider(model="deepseek-chat", api_key="sk-...")
+points = await build_eval_set(my_conversations, llm=llm)
+report = await evaluate(points, strategies=["truncate", "simple"], llm=llm)
+print(report.summary())
+```
+
+It compresses each history, asks a model to answer using **only** the compressed
+text, and scores the answer against key points taken from the reply that was
+actually given. The keys are extracted once and frozen — extracting them at
+scoring time would grade every run against a different ruler.
+
+Two things to know before you trust a result: differences under ~5 points are
+noise at this sample size, and the independent unit is the **conversation**, not
+the question — adding turns to a conversation you already have sharpens nothing.
+Also note this sends your transcripts to the model provider, since extraction
+and judging both need an LLM.
+
+## Status and limitations
+
+- `acs` costs one to two LLM calls per compression. That is the point: it is
+  the expensive path you take when the question needs reading.
+- Degradation is reported, never hidden — but it is also never fatal. Check
+  `stats["degraded"]` in production.
+- The `v2` design notes (strategic reasoning, phase-aware retention,
+  multi-dimensional quality scoring) are design documents, not shipped code.
+- **`hcs` is not recommended.** It was tested where its one feature should
+  matter — 45 points from Chinese sessions containing 26k command executions
+  and file diffs — and landed level with truncation and keyword matching
+  (45.9% vs 46.0% / 49.6%, p=1.00). Across six evaluations it has never been
+  significantly better, while costing an extra LLM call. The code stays; the
+  recommendation does not.
+- **Automatic retriever routing does not work**, and this is measured rather
+  than suspected. `recommend_retriever()` picks the better retriever 41% of the
+  time. The deeper reason is in `benchmarks/README.md`: an answer is either
+  randomly positioned (nothing predicts it, and "always retrieve" is already
+  optimal) or near the end (where the two options tie, so there is nothing to
+  win). Choose the retriever yourself.
+
+## Documentation
+
+- [`docs/quickstart.md`](docs/quickstart.md) — install to first result
+- [`docs/scenarios.md`](docs/scenarios.md) — when to use it, and when not to
+- [`docs/integration.md`](docs/integration.md) — OpenAI SDKs, LangChain, custom stages
+- [`docs/faq.md`](docs/faq.md) — degraded runs, passthrough, cost, Chinese support
+- [`benchmarks/README.md`](benchmarks/README.md) — how the numbers were measured
+- [`RELEASING.md`](RELEASING.md) — release checklist
+- [`CHANGELOG.md`](CHANGELOG.md)
+
+## Contributing
+
+Useful contributions, roughly in order of value: adapters for other frameworks
+(AutoGen, CrewAI), a semantic scoring pass for `benchmarks/` that measures what
+the current substring metric misses, better handling of code-level detail, and
+expression-normalisation maps beyond Chinese/English.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Citation
 
 ```bibtex
 @software{shenlunforge2026,
@@ -402,13 +437,3 @@ MIT 许可证 — 详见 LICENSE 文件 / MIT License — see LICENSE file for d
   url={https://github.com/liurongchen1/shenlun-forge}
 }
 ```
-
-## 贡献 / Contributing
-
-欢迎贡献！我们特别需要以下方面的帮助：
-Contributions welcome! Areas we'd love help with:
-
-- 更多框架适配器 / More framework adapters (AutoGen, CrewAI, LlamaIndex)
-- 额外压缩策略 / Additional compression strategies
-- 上下文压缩评估基准数据集 / Benchmark datasets for context compression evaluation
-- 多语言表达规范化映射 / Multilingual expression normalization maps

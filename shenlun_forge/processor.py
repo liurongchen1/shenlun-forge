@@ -68,6 +68,10 @@ NORMALIZE_MAP = {
     "a lot of": "multiple",
 }
 
+# How many entities `_preserve_entities` inspects. See the note there: checking
+# all of them scales badly and only the longest few dozen are ever injected.
+_ENTITY_CHECK_LIMIT = 300
+
 
 class ACSProcessor(BaseProcessor):
     """Processor that merges, labels, and normalizes context (Process step)."""
@@ -157,6 +161,10 @@ class ACSProcessor(BaseProcessor):
                 info_type=group_blocks[0].info_type if group_blocks else None,
                 preserved_token_count=original_tokens,
                 compression_ratio=compressed_tokens / max(original_tokens, 1),
+                # A group is as relevant as its most relevant member.
+                relevance_score=max(
+                    (b.relevance_score for b in group_blocks), default=0.0
+                ),
             ))
 
         # Sort by original first index to maintain flow
@@ -500,9 +508,15 @@ class ACSProcessor(BaseProcessor):
         """
         full_text = "\n".join(b.content for b in compressed)
 
-        missing = [e for e in entities if e not in full_text]
+        # Checking every entity against the whole text is O(entities x text),
+        # which is fine on a short conversation and quadratic on a long one: a
+        # 200k-character history holds thousands of candidates and took 15
+        # minutes to scan. Only the longest are ever injected (30), so checking
+        # a few hundred of them is both enough and linear.
+        candidates = sorted(entities, key=len, reverse=True)[:_ENTITY_CHECK_LIMIT]
+        missing = [e for e in candidates if e not in full_text]
 
-        if not missing or len(missing) <= len(entities) * 0.3:
+        if not missing or len(missing) <= len(candidates) * 0.3:
             # Most entities preserved (>=70%), no need to inject
             return compressed
 
@@ -528,6 +542,7 @@ class ACSProcessor(BaseProcessor):
             info_type=InfoType.FACT,
             preserved_token_count=preserved_tokens,
             compression_ratio=1.0,
+            relevance_score=1.0,
         ))
 
         return compressed

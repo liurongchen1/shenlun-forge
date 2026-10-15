@@ -20,16 +20,15 @@ from typing import Optional
 
 from ..types import (
     ContextBlock, CompressedBlock, TaskProfile,
-    CompressionResult,
+    CompressionResult, MIN_TOKENS_TO_COMPRESS, MIN_COMPRESSION_GAIN,
+    split_recent_window, render_recent_blocks, validate_overflow_policy,
 )
 from ..base import LLMProvider
-from ..llm import OpenAIProvider
+from ..llm import OpenAIProvider, InstrumentedProvider, probe_llm
 from ..analyzer import ACSAnalyzer
 from ..retriever import ACSRetriever
 from ..processor import ACSProcessor
 from ..formatter import ACSFormatter
-
-
 class HCSCompressor:
     """
     ACS semantic summary + verbatim code augmentation.
@@ -70,10 +69,19 @@ class HCSCompressor:
                 base_url=base_url,
             )
 
+        # Probe once so callers can be told when the pipeline degrades.
+        self.llm_ready, self.llm_unavailable_reason = probe_llm(self.llm)
+        self._llm_stats = {"calls": 0, "failures": 0}
+        active_llm = (
+            InstrumentedProvider(self.llm, self._llm_stats)
+            if self.llm_ready
+            else None
+        )
+
         # ACS pipeline
-        self.analyzer = ACSAnalyzer(llm=self.llm)
-        self.processor = ACSProcessor(llm=self.llm)
-        self.formatter = ACSFormatter(llm=self.llm)
+        self.analyzer = ACSAnalyzer(llm=active_llm)
+        self.processor = ACSProcessor(llm=active_llm)
+        self.formatter = ACSFormatter(llm=active_llm)
 
         # Retriever: rule-based or embedding
         if retriever_type == "embedding":
@@ -92,23 +100,26 @@ class HCSCompressor:
         current_query: str = "",
         max_tokens: int = 4000,
         verbose: bool = False,
-        recent_window: int = 6,
+        recent_window: int = 0,
+        budget_overflow: str = "keep",
     ) -> CompressionResult:
+        """Compress. See ShenlunForge.compress for ``budget_overflow``."""
+        validate_overflow_policy(budget_overflow)
         start_time = time.time()
         steps_log = {}
+        recent_truncated = False
+
+        # Per-call LLM instrumentation (reset so stats describe this run only)
+        self._llm_stats["calls"] = 0
+        self._llm_stats["failures"] = 0
 
         # Parse messages
         blocks = self._parse_messages(messages)
         original_tokens = sum(b.token_count for b in blocks)
 
-        # Recent window protection: keep last N messages uncompressed
-        recent_window_size = min(recent_window, len(blocks))
-        if recent_window_size > 0 and len(blocks) > recent_window_size:
-            early_blocks = blocks[:-recent_window_size]
-            recent_blocks = blocks[-recent_window_size:]
-        else:
-            early_blocks = blocks
-            recent_blocks = []
+        # Recent-message protection, budget-aware (see split_recent_window).
+        early_blocks, recent_blocks = split_recent_window(blocks, max_tokens, recent_window)
+        recent_tokens = sum(b.token_count for b in recent_blocks)
 
         # ─── Step 1: Extract code blocks verbatim (from early blocks) ───
         t0 = time.time()
@@ -125,9 +136,11 @@ class HCSCompressor:
             code_token_count,
             int(max_tokens * self.code_budget_ratio),
         )
+        # The protected recent messages are appended verbatim, so their cost
+        # has to come out of the budget too — otherwise the result exceeds it.
         narrative_budget = max(
             self.min_narrative_budget,
-            max_tokens - actual_code_tokens,
+            max_tokens - actual_code_tokens - recent_tokens,
         )
 
         steps_log["budget"] = {
@@ -155,12 +168,19 @@ class HCSCompressor:
                 truncated_code = self._truncate_text(code_blocks_text, actual_code_tokens)
             parts.append("## Preserved Code Blocks")
             parts.append(truncated_code)
-        if recent_blocks:
-            recent_text = "\n".join(b.content for b in recent_blocks)
-            parts.append("## Recent Messages (Uncompressed)")
-            parts.append(recent_text)
 
         compressed_text = "\n\n".join(parts) if parts else ""
+
+        # Append the protected recent messages, honouring the overflow policy.
+        if recent_blocks:
+            remaining = max_tokens - self.llm.count_tokens(compressed_text)
+            appended, truncated = render_recent_blocks(
+                recent_blocks, remaining, budget_overflow
+            )
+            if appended:
+                compressed_text = compressed_text + appended
+            recent_truncated = recent_truncated or truncated
+
         compressed_tokens = self.llm.count_tokens(compressed_text)
 
         # ─── Step 5: Quality gate ──────────────────────────────────────
@@ -172,6 +192,10 @@ class HCSCompressor:
                 "reason": f"savings {savings_pct:.1f}% > {self.fallback_savings_threshold}%",
             }
             simple_result.stats["hybrid_fallback"] = True
+            simple_result.stats["llm_available"] = self.llm_ready
+            simple_result.stats["degraded"] = (
+                (not self.llm_ready) or self._llm_stats["failures"] > 0
+            )
             simple_result.steps_log = steps_log if verbose else {}
             return simple_result
 
@@ -204,6 +228,35 @@ class HCSCompressor:
                     compression_ratio=1.0,
                 ))
 
+        # ── Passthrough guard ────────────────────────────────────────
+        # Hand back the original context when compression saves nothing
+        # meaningful, so the caller never receives a longer "compressed" text.
+        passthrough = False
+        if original_tokens == 0 or (
+            original_tokens > 0
+            and (
+                original_tokens < MIN_TOKENS_TO_COMPRESS
+                or original_tokens <= max_tokens
+                or compressed_tokens >= original_tokens * (1 - MIN_COMPRESSION_GAIN)
+            )
+        ):
+            compressed_text = "\n".join(b.content for b in blocks)
+            # Output is the original context — report the original token count
+            # so a no-op run never shows a ratio above 1.0.
+            compressed_tokens = original_tokens
+            compressed_blocks = [
+                CompressedBlock(
+                    content=b.content,
+                    original_indices=[b.msg_index],
+                    summary_label=b.role,
+                    info_type=b.info_type,
+                    preserved_token_count=b.token_count,
+                    compression_ratio=1.0,
+                )
+                for b in blocks
+            ]
+            passthrough = True
+
         return CompressionResult(
             compressed_text=compressed_text,
             original_tokens=original_tokens,
@@ -218,6 +271,24 @@ class HCSCompressor:
                 "code_tokens": actual_code_tokens,
                 "code_blocks_found": code_token_count > 0,
                 "fallback_triggered": False,
+                "llm_available": self.llm_ready,
+                "llm_calls": self._llm_stats["calls"],
+                "llm_failures": self._llm_stats["failures"],
+                "degraded": (not self.llm_ready) or self._llm_stats["failures"] > 0,
+                "degraded_reason": (
+                    self.llm_unavailable_reason
+                    if not self.llm_ready
+                    else (
+                        f"{self._llm_stats['failures']} LLM call(s) failed at runtime; "
+                        "rule-based fallback was used"
+                        if self._llm_stats["failures"]
+                        else ""
+                    )
+                ),
+                "passthrough": passthrough,
+                "over_budget": (not passthrough)
+                and compressed_tokens > max_tokens * 1.02,
+                "recent_truncated": recent_truncated,
             },
             steps_log=steps_log if verbose else {},
         )
@@ -229,7 +300,17 @@ class HCSCompressor:
         max_tokens: int = 4000,
         **kwargs,
     ) -> CompressionResult:
-        return asyncio.run(self.compress(messages, current_query, max_tokens, **kwargs))
+        """Synchronous wrapper that also closes the LLM client afterwards."""
+
+        async def _run() -> CompressionResult:
+            try:
+                return await self.compress(messages, current_query, max_tokens, **kwargs)
+            finally:
+                closer = getattr(self.llm, "aclose", None)
+                if closer is not None:
+                    await closer()
+
+        return asyncio.run(_run())
 
     # ─── Internal Methods ──────────────────────────────────────────────
 
@@ -295,13 +376,26 @@ class HCSCompressor:
         return code_text, code_tokens
 
     def _truncate_text(self, text: str, target_tokens: int) -> str:
-        """Truncate text to approximately target_tokens."""
-        # Rough: 1 token ≈ 4 chars for English, ~2 chars for Chinese
-        # Use conservative estimate
-        max_chars = target_tokens * 3
-        if len(text) <= max_chars:
+        """Truncate text to at most target_tokens.
+
+        This used to slice by ``target_tokens * 3`` characters, which is only
+        roughly right for English prose. On Chinese text three characters is
+        closer to 1.5-3 tokens, so the "truncated" code block could come out at
+        twice the budget it was given and push the whole result over
+        ``max_tokens``.
+        """
+        count = self.llm.count_tokens
+        if count(text) <= target_tokens:
             return text
-        return text[:max_chars] + "\n...[truncated]"
+
+        low, high = 0, len(text)
+        while low < high - 10:
+            mid = (low + high) // 2
+            if count(text[:mid]) <= target_tokens:
+                low = mid
+            else:
+                high = mid
+        return text[:low] + "\n...[truncated]"
 
     async def _fallback_simple(
         self,

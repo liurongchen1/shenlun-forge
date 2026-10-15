@@ -27,7 +27,8 @@ Quick Start:
     print(result.compressed_text)
 """
 
-__version__ = "0.2.0"
+from ._version import __version__
+
 __author__ = "Liu Rongchen"
 
 from .types import (
@@ -36,14 +37,18 @@ from .types import (
     TaskProfile,
     TaskType,
     CompressionResult,
+    CompressionPlan,
     InfoType,
     count_tokens,
+    plan_compression,
 )
 from .compressor import ShenlunForge
 from .llm import OpenAIProvider
 from .strategies.simple import SimpleStrategy
 from .strategies.hybrid import HCSCompressor
-from .registry import get_strategy_class, list_strategies
+from .registry import get_strategy_class, list_strategies, register_strategy
+from .router import recommend_retriever, RetrieverChoice
+from .evaluation import EvalPoint, EvalReport, build_eval_set, evaluate
 
 from .analyzer import ACSAnalyzer
 from .retriever import ACSRetriever
@@ -74,8 +79,17 @@ __all__ = [
     "TaskProfile",
     "TaskType",
     "CompressionResult",
+    "CompressionPlan",
+    "plan_compression",
     "InfoType",
     "count_tokens",
     "get_strategy_class",
     "list_strategies",
+    "register_strategy",
+    "recommend_retriever",
+    "RetrieverChoice",
+    "EvalPoint",
+    "EvalReport",
+    "build_eval_set",
+    "evaluate",
 ]

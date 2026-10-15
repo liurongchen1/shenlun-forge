@@ -7,7 +7,7 @@ Usage:
     shenlun-forge version
 
 Examples:
-    # Compress a JSON messages file
+    # Compress a JSON messages file (default strategy: simple, no API key)
     shenlun-forge compress --messages messages.json --query "What did we decide?" --max-tokens 4000
 
     # Compress from stdin
@@ -16,10 +16,12 @@ Examples:
     # List available strategies
     shenlun-forge strategies
 
-    # Use a specific strategy
+    # LLM-powered strategies need a key (acs = full pipeline, hcs = keep code verbatim)
+    shenlun-forge compress --messages messages.json --strategy acs \
+        --api-key "sk-..." --base-url "https://api.deepseek.com/v1"
     shenlun-forge compress --messages messages.json --strategy hcs --max-tokens 2000
 
-    # Use SimpleStrategy (no API key needed)
+    # Rule-based strategy, explicit (no API key needed)
     shenlun-forge compress --messages messages.json --strategy simple --max-tokens 1000
 """
 
@@ -58,8 +60,11 @@ def get_parser() -> argparse.ArgumentParser:
     )
     compress_parser.add_argument(
         "--strategy", "-s",
-        default="acs",
-        help="Compression strategy: acs, simple, hcs (default: acs)",
+        default="simple",
+        help=(
+            "Compression strategy: simple, acs, hcs (default: simple). "
+            "'simple' needs no API key; 'acs' and 'hcs' require an LLM."
+        ),
     )
     compress_parser.add_argument(
         "--max-tokens", "-t",
@@ -74,8 +79,9 @@ def get_parser() -> argparse.ArgumentParser:
     )
     compress_parser.add_argument(
         "--api-key",
-        default=os.getenv("SHENLUN_FORGE_API_KEY", os.getenv("OPENAI_API_KEY", "")),
-        help="API key (or set SHENLUN_FORGE_API_KEY / OPENAI_API_KEY env var)",
+        default=os.getenv("SHENLUN_FORGE_API_KEY",
+                          os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY", ""))),
+        help="API key (or set SHENLUN_FORGE_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY)",
     )
     compress_parser.add_argument(
         "--base-url",
@@ -88,12 +94,50 @@ def get_parser() -> argparse.ArgumentParser:
         help="Include detailed step-by-step processing log in output",
     )
     compress_parser.add_argument(
+        "--budget-overflow",
+        choices=["keep", "truncate"],
+        default="keep",
+        help=(
+            "When the newest messages do not fit --max-tokens: 'keep' "
+            "(default) preserves them whole and may exceed the budget; "
+            "'truncate' trims them to stay within it."
+        ),
+    )
+    compress_parser.add_argument(
         "--output", "-o",
         help="Output file path (default: stdout)",
     )
 
     # --- strategies ---
     subparsers.add_parser("strategies", help="List available compression strategies")
+
+    # --- eval ---
+    eval_parser = subparsers.add_parser(
+        "eval", help="Measure whether compression helps on your own conversations")
+    eval_parser.add_argument(
+        "--conversations", "-c", required=True,
+        help="Directory of JSON files, each containing {\"messages\": [...]}",
+    )
+    eval_parser.add_argument(
+        "--strategies", "-s", default="truncate,simple",
+        help="Comma-separated; 'truncate' is the naive baseline (default: truncate,simple)",
+    )
+    eval_parser.add_argument("--budget", "-t", type=int, default=16000,
+                             help="Token budget per compression (default: 16000)")
+    eval_parser.add_argument("--max-points", type=int, default=40,
+                             help="Cap how many questions to test (default: 40)")
+    eval_parser.add_argument("--samples", type=int, default=1,
+                             help="Answer+judge repeats per point, averaged (default: 1)")
+    eval_parser.add_argument(
+        "--model", default=os.getenv("SHENLUN_FORGE_MODEL", "deepseek-chat"))
+    eval_parser.add_argument(
+        "--api-key",
+        default=os.getenv("SHENLUN_FORGE_API_KEY",
+                          os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY", ""))))
+    eval_parser.add_argument(
+        "--base-url",
+        default=os.getenv("SHENLUN_FORGE_BASE_URL", os.getenv("OPENAI_BASE_URL", "")))
+    eval_parser.add_argument("--json", help="Also write the report as JSON here")
 
     # --- version ---
     subparsers.add_parser("version", help="Show version information")
@@ -128,6 +172,21 @@ def load_messages(args) -> list[dict[str, str]]:
     return messages
 
 
+def resolve_base_url(explicit: str) -> str:
+    """Pick an endpoint that matches the API key we found.
+
+    A `DEEPSEEK_API_KEY` with the default OpenAI endpoint returns a confusing
+    401, so infer the matching base URL when the caller did not give one.
+    """
+    if explicit:
+        return explicit
+    if os.getenv("DEEPSEEK_BASE_URL"):
+        return os.getenv("DEEPSEEK_BASE_URL")
+    if os.getenv("DEEPSEEK_API_KEY") and not os.getenv("OPENAI_API_KEY"):
+        return "https://api.deepseek.com/v1"
+    return ""
+
+
 async def run_compress(args):
     """Execute the compress command."""
     from .compressor import ShenlunForge
@@ -142,7 +201,7 @@ async def run_compress(args):
             strategy=args.strategy,
             model=args.model,
             api_key=args.api_key,
-            base_url=args.base_url or None,
+            base_url=resolve_base_url(args.base_url) or None,
         )
 
     result = await compressor.compress(
@@ -150,7 +209,32 @@ async def run_compress(args):
         current_query=args.query,
         max_tokens=args.max_tokens,
         verbose=args.verbose,
+        budget_overflow=args.budget_overflow,
     )
+
+    # Never let a degraded or no-op run look like a success.
+    if result.stats.get("degraded"):
+        reason = result.stats.get("degraded_reason") or "compression ran in degraded mode"
+        print(f"Warning: {reason}", file=sys.stderr)
+    if result.stats.get("over_budget"):
+        print(
+            f"Note: output is {result.compressed_tokens} tokens, over the "
+            f"{args.max_tokens} budget, because --budget-overflow=keep preserved "
+            "the newest messages whole. Use --budget-overflow=truncate to "
+            "enforce the budget.",
+            file=sys.stderr,
+        )
+    if result.stats.get("recent_truncated"):
+        print(
+            "Note: the newest message was truncated to stay within the budget.",
+            file=sys.stderr,
+        )
+    if result.stats.get("passthrough"):
+        print(
+            "Note: compression would not have saved tokens, so the original "
+            "context was returned unchanged.",
+            file=sys.stderr,
+        )
 
     output = {
         "compressed_text": result.compressed_text,
@@ -178,9 +262,9 @@ def cmd_strategies(args):
     strategies = list_strategies()
     print("Available compression strategies:\n")
     descriptions = {
-        "acs": "Full 4-step ACS pipeline (Analyze→Retrieve→Process→Format). Requires LLM.",
-        "simple": "Rule-based compression. No LLM needed. Fast and lightweight.",
-        "hcs": "ACS semantic summary + verbatim code augmentation. Requires LLM.",
+        "acs": "Full 4-step ACS pipeline (Analyze→Retrieve→Process→Format). Requires an LLM.",
+        "simple": "Rule-based selection. No LLM, no API key, milliseconds. [default]",
+        "hcs": "ACS semantic summary + verbatim code blocks. Requires an LLM.",
     }
     for name in strategies:
         desc = descriptions.get(name, "")
@@ -193,12 +277,71 @@ def cmd_version(args):
     print(f"shenlun-forge {__version__}")
 
 
+async def run_eval(args):
+    """Measure compression on the user's own conversations."""
+    import json as _json
+    from .evaluation import build_eval_set, evaluate
+    from .llm import OpenAIProvider
+
+    if not args.api_key:
+        print("Error: eval needs an API key (extracting answer keys and judging "
+              "answers both call a model).", file=sys.stderr)
+        sys.exit(1)
+
+    directory = Path(args.conversations)
+    if not directory.is_dir():
+        print(f"Error: not a directory: {directory}", file=sys.stderr)
+        sys.exit(1)
+
+    conversations = []
+    for path in sorted(directory.glob("*.json")):
+        if path.name.startswith("."):
+            continue
+        try:
+            conversations.append(_json.loads(path.read_text(encoding="utf-8")))
+        except _json.JSONDecodeError:
+            continue
+    if not conversations:
+        print(f"Error: no readable conversations in {directory}", file=sys.stderr)
+        sys.exit(1)
+
+    llm = OpenAIProvider(model=args.model, api_key=args.api_key,
+                         base_url=resolve_base_url(args.base_url) or None, temperature=0.0)
+    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+
+    print(f"从 {len(conversations)} 个对话构建测试（提取答案要点需要模型调用）...",
+          file=sys.stderr)
+    points = await build_eval_set(conversations, llm=llm, max_points=args.max_points)
+    if not points:
+        print("Error: no usable evaluation points found — check that the "
+              "conversations contain substantial question/answer turns.",
+              file=sys.stderr)
+        sys.exit(1)
+    print(f"得到 {len(points)} 个测试点，开始评测...\n", file=sys.stderr)
+
+    report = await evaluate(points, strategies=strategies, budget=args.budget,
+                            llm=llm, samples=args.samples,
+                            progress=lambda s, i, n: print(f"  {s} {i}/{n}", file=sys.stderr))
+    await llm.aclose()
+
+    print()
+    print(report.summary())
+    if args.json:
+        Path(args.json).write_text(_json.dumps({
+            "budget": report.budget, "counts": report.counts,
+            "accuracy": report.accuracy, "per_point": report.per_point,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n报告已写入 {args.json}", file=sys.stderr)
+
+
 def main():
     parser = get_parser()
     args = parser.parse_args()
 
     if args.command == "compress":
         asyncio.run(run_compress(args))
+    elif args.command == "eval":
+        asyncio.run(run_eval(args))
     elif args.command == "strategies":
         cmd_strategies(args)
     elif args.command == "version":

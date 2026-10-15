@@ -1,0 +1,20 @@
+# Source distribution contents.
+#
+# The wheel only ships the package itself; the sdist is the full checkout, so
+# anyone installing from source (or auditing the release) also gets the docs,
+# examples and benchmark data.
+include LICENSE
+include README.md
+include README.zh-CN.md
+include CHANGELOG.md
+include RELEASING.md
+include pyproject.toml
+
+recursive-include shenlun_forge *.py py.typed
+recursive-include docs *.md
+recursive-include examples *.py
+recursive-include benchmarks *.py *.md *.json
+recursive-include tests *.py
+recursive-include scripts *.py *.sh
+
+global-exclude __pycache__ *.py[cod] .DS_Store

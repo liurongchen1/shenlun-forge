@@ -97,6 +97,11 @@ class ACSFormatter(BaseFormatter):
             parts.append(header)
             used_tokens += header_tokens
 
+            # Once a group is partially truncated the budget is spent, and the
+            # outer loop has to stop too — breaking only the inner loop used to
+            # let every remaining group append another truncated entry, which
+            # made the "budgeted" output up to 9x the budget.
+            budget_exhausted = False
             for block in group_blocks:
                 entry = f"- {block.content}"
                 entry_tokens = count_tokens(entry)
@@ -106,10 +111,15 @@ class ACSFormatter(BaseFormatter):
                     if remaining > 10:
                         entry = self._truncate_to_budget(entry, remaining)
                         parts.append(entry)
+                        used_tokens += remaining
+                    budget_exhausted = True
                     break
 
                 parts.append(entry)
                 used_tokens += entry_tokens
+
+            if budget_exhausted:
+                break
 
         return "\n".join(parts)
 
@@ -160,16 +170,22 @@ class ACSFormatter(BaseFormatter):
 
     def _block_priority(self, block: CompressedBlock) -> float:
         """Calculate priority score for block ordering.
-        
-        Uses InfoType enum values as keys to correctly map block.info_type
-        to priority weights.
+
+        Query relevance dominates. The retriever already scored every message
+        against the current query, and a block that answers the question must
+        outrank one that merely happens to be a "fact" or sit early in the
+        conversation — otherwise the budget is spent on whatever the
+        classifier liked rather than on what was asked for.
         """
         priority = 0.0
+
+        # 1. Query relevance from the retriever (dominant signal)
+        priority += min(max(block.relevance_score, 0.0), 1.0) * 0.60
 
         # Higher compression ratio = was more bloated, lower priority
         # (we already extracted the essence, so less compressed = denser info)
         if block.compression_ratio > 0:
-            priority += (1 - block.compression_ratio) * 0.3
+            priority += (1 - block.compression_ratio) * 0.10
 
         # Info type priority — keyed by InfoType enum values
         type_priority = {
@@ -186,11 +202,11 @@ class ACSFormatter(BaseFormatter):
 
         if block.info_type:
             info_type = block.info_type if isinstance(block.info_type, InfoType) else InfoType(block.info_type)
-            priority += type_priority.get(info_type, 0.30) * 0.4
+            priority += type_priority.get(info_type, 0.30) * 0.25
 
         # Original position bonus (earlier = slightly higher for context)
         if block.original_indices:
             position_bonus = 1.0 / (1 + block.original_indices[0] * 0.1)
-            priority += position_bonus * 0.3
+            priority += position_bonus * 0.05
 
         return priority

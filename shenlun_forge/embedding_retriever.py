@@ -8,12 +8,23 @@ Uses fastembed (ONNX runtime) instead of sentence-transformers (PyTorch),
 making it ~10x lighter to install and compatible with Intel Macs where
 PyTorch >= 2.4 wheels are unavailable.
 
-Model download tips for users in China:
-  - fastembed downloads from HuggingFace by default
-  - Set environment variable: export HF_ENDPOINT=https://hf-mirror.com
+Model download:
+  - fastembed pulls its ONNX build from huggingface.co and caches it locally
+  - the common HF_ENDPOINT=https://hf-mirror.com mirror does *not* carry those
+    repositories, so it fails with "Could not load model ... from any source";
+    route through a proxy that can reach huggingface.co instead
+
+Known issue: memory use on very long histories.
+  Encoding a few hundred messages per call is fine, but scoring dozens of
+  ~100k-token conversations in one process drove resident memory to ~3GB — and
+  it happened with as few as eight conversations, so it is not the embedding
+  cache (which is now bounded) but something in the encode path itself.
+  Until that is investigated, prefer the default rule-based retriever for long
+  histories, or run the embedding retriever in short-lived batches.
 """
 
 from __future__ import annotations
+from collections import OrderedDict
 import hashlib
 import re
 from typing import Optional
@@ -37,6 +48,14 @@ class EmbeddingRetriever(BaseRetriever):
         recency_weight: Weight for recency bonus (0-1). Default: 0.15
             When two blocks have similar semantic relevance, the more recent
             one gets a slight boost. Set to 0 for pure semantic ranking.
+    cache_size: Maximum number of cached embeddings, least-recently-used first
+        to be evicted. Default: 20000 (roughly 40MB). Pass 0 to disable the
+        bound, which is only sensible for short-lived processes.
+    batch_size: Documents per forward pass. Default 32, well below fastembed's
+        own default of 256: with 256, a few hundred messages activate
+        ~256 x 512 x 512 x 12 layers of intermediate tensors, which measured at
+        ~4GB for a single 500-message history. Smaller batches trade a little
+        speed for an order of magnitude less memory.
 
     Usage:
         # In ShenlunForge
@@ -56,13 +75,29 @@ class EmbeddingRetriever(BaseRetriever):
         model_name: str = "BAAI/bge-small-zh-v1.5",
         top_k: int = 20,
         recency_weight: float = 0.15,
+        cache_size: int = 20_000,
+        batch_size: int = 32,
         **kwargs,
     ):
         self.model_name = model_name
         self.top_k = top_k
         self.recency_weight = recency_weight
+        # Embeddings are cached by content hash so repeated queries over the same
+        # conversation are cheap. The cache is bounded because in a long-running
+        # agent every new conversation adds more entries and nothing is ever
+        # evicted — an unbounded cache looked fine on one conversation and grew
+        # to gigabytes when scoring a few dozen long ones.
+        self.cache_size = cache_size
+        self.batch_size = max(1, batch_size)
         self._model = None
-        self._cache: dict[str, object] = {}
+        self._cache: "OrderedDict[str, object]" = OrderedDict()
+
+    def _remember(self, key: str, value) -> None:
+        """Store an embedding, evicting the least recently used past the cap."""
+        self._cache[key] = value
+        self._cache.move_to_end(key)
+        if self.cache_size and len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
 
     def _get_model(self):
         """Lazy load the embedding model on first use."""
@@ -125,11 +160,11 @@ class EmbeddingRetriever(BaseRetriever):
 
         if uncached_texts:
             model = self._get_model()
-            embeddings = list(model.embed(uncached_texts))
+            embeddings = list(model.embed(uncached_texts, batch_size=self.batch_size))
             for idx, text, emb in zip(uncached_indices, uncached_texts, embeddings):
                 normalized = self._normalize(emb)
                 h = self._content_hash(text)
-                self._cache[h] = normalized
+                self._remember(h, normalized)
                 results[idx] = normalized
 
         return np.array(results, dtype=np.float32)
