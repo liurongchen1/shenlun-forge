@@ -105,6 +105,12 @@ class HCSCompressor:
     ) -> CompressionResult:
         """Compress. See ShenlunForge.compress for ``budget_overflow``."""
         validate_overflow_policy(budget_overflow)
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
+            raise ValueError(
+                f"max_tokens must be a positive integer, got {max_tokens!r}. If it "
+                "came from plan_compression(), a None recommended_max_tokens means "
+                "the history already fits — send it as is instead."
+            )
         start_time = time.time()
         steps_log = {}
         recent_truncated = False

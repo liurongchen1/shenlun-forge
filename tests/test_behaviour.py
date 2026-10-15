@@ -318,3 +318,30 @@ class TestBudgetOverflowPolicy:
                 current_query="x",
                 budget_overflow="typo",
             )
+
+
+class TestMaxTokensValidation:
+    """A missing or nonsense budget must fail readably, not deep inside.
+
+    `plan_compression()` returns `recommended_max_tokens=None` when the history
+    already fits. Passing that straight through used to die in the pipeline
+    with "unsupported operand type(s) for *: 'NoneType' and 'float'".
+    """
+
+    MESSAGES = [{"role": "user", "content": "你好"}, {"role": "assistant", "content": "你好"}]
+
+    def test_none_budget_is_rejected(self):
+        forge = ShenlunForge.create(strategy="simple")
+        with pytest.raises(ValueError, match="positive integer"):
+            forge.compress_sync(messages=self.MESSAGES, current_query="x", max_tokens=None)
+
+    def test_zero_and_negative_are_rejected(self):
+        forge = ShenlunForge.create(strategy="simple")
+        for bad in (0, -5):
+            with pytest.raises(ValueError, match="positive"):
+                forge.compress_sync(messages=self.MESSAGES, current_query="x", max_tokens=bad)
+
+    def test_error_points_at_the_plan_compression_case(self):
+        forge = ShenlunForge.create(strategy="simple")
+        with pytest.raises(ValueError, match="plan_compression"):
+            forge.compress_sync(messages=self.MESSAGES, current_query="x", max_tokens=None)

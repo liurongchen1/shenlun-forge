@@ -24,6 +24,26 @@ from .analyzer import ACSAnalyzer
 from .retriever import ACSRetriever
 from .processor import ACSProcessor
 from .formatter import ACSFormatter
+
+
+def _validate_max_tokens(max_tokens) -> int:
+    """Reject a missing or nonsensical budget with a usable message.
+
+    ``plan_compression()`` returns ``None`` when the history already fits, and
+    passing that straight through used to fail deep inside as
+    "unsupported operand type(s) for *: 'NoneType' and 'float'".
+    """
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+        raise ValueError(
+            f"max_tokens must be a positive integer, got {max_tokens!r}. If it "
+            "came from plan_compression(), a None recommended_max_tokens means "
+            "the history already fits — send it as is instead."
+        )
+    if max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive, got {max_tokens!r}")
+    return max_tokens
+
+
 class ShenlunForge:
     """
     Task-driven context compression engine.
@@ -135,6 +155,7 @@ class ShenlunForge:
             CompressionResult with compressed text and statistics.
         """
         validate_overflow_policy(budget_overflow)
+        max_tokens = _validate_max_tokens(max_tokens)
         start_time = time.time()
         steps_log = {}
         recent_truncated = False

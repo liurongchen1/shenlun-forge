@@ -75,8 +75,11 @@ print(result.compressed_text)
 shenlun-forge compress --messages chat.json --query "我们最后定了哪个数据库？"
 ```
 
-更多：[`docs/quickstart.md`](docs/quickstart.md) ·
-[`examples/quickstart_no_llm.py`](examples/quickstart_no_llm.py)
+**想跟着一步步做？** 完整教程（从"历史装不下"到"知道该配什么"）：
+[`docs/tutorial.md`](docs/tutorial.md)
+
+更多：快速开始 [`docs/quickstart.md`](docs/quickstart.md) ·
+可跑示例 [`examples/quickstart_no_llm.py`](examples/quickstart_no_llm.py)
 
 ## 该选哪个策略
 
@@ -354,6 +357,7 @@ print(report.summary())
 
 ## 文档
 
+- **[`docs/tutorial.md`](docs/tutorial.md) —— 端到端教程（推荐从这里开始）**
 - [`docs/quickstart.md`](docs/quickstart.md) —— 从安装到第一个结果
 - [`docs/scenarios.md`](docs/scenarios.md) —— 什么时候该用、什么时候不该用
 - [`docs/integration.md`](docs/integration.md) —— OpenAI SDK、LangChain、自定义阶段
