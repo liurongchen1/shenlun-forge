@@ -41,6 +41,45 @@ RECENT_BUDGET_SHARE = 0.4
 BUDGET_OVERFLOW_POLICIES = ("keep", "truncate")
 RECENT_HEADER = "\n\n## Recent Messages (Uncompressed)\n"
 
+# A compressor that drops history silently leaves the model unable to tell "the
+# answer is not there" apart from "I was never shown it", so it reports the
+# first when the second is true. Saying that a gap exists costs one line.
+# Measured on three datasets (benchmarks/README.md): worth about +10 points of
+# answer quality where a 20-50% compression ratio still reads like a history,
+# and nothing measurable when almost the whole history is dropped. It does not
+# make the model declare gaps more often, and it does not measurably stop it
+# from guessing — only the score moved.
+DROPPED_NOTICE_EN = (
+    "\n\n[compression note] {n} earlier messages (~{t} tokens) are not included "
+    "above. If the answer is not here, say what is missing rather than guessing."
+)
+DROPPED_NOTICE_ZH = (
+    "\n\n【压缩说明】另有 {n} 条较早历史未包含在上文（约 {t} tokens）。"
+    "如果这里找不到答案，请说明缺口，不要臆测。"
+)
+
+# Tokens held back so the notice cannot push the result past its budget.
+DROPPED_NOTICE_RESERVE_TOKENS = 80
+
+
+def render_dropped_notice(dropped_messages: int, dropped_tokens: int, language_hint: str = "") -> str:
+    """Describe what was left out, in the language the question was asked in.
+
+    Returns an empty string when nothing was dropped, so callers can append
+    unconditionally.
+    """
+    if dropped_messages <= 0:
+        return ""
+    template = DROPPED_NOTICE_ZH if _is_mostly_chinese(language_hint) else DROPPED_NOTICE_EN
+    return template.format(n=dropped_messages, t=f"{dropped_tokens:,}")
+
+
+def _is_mostly_chinese(text: str) -> bool:
+    if not text:
+        return False
+    chinese = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return chinese >= max(1, len(text) * 0.15)
+
 
 class TaskType(str, Enum):
     """Task types that drive compression strategy."""

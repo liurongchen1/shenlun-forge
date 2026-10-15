@@ -76,6 +76,7 @@ async def compress_history(
     api_key: str,
     base_url: str,
     model: str,
+    dropped_notice: bool = True,
 ) -> tuple:
     """Return (context_text, compression_ratio) for one strategy."""
     if strategy == "truncate":
@@ -90,6 +91,7 @@ async def compress_history(
         result = await forge_cache[strategy].compress(
             messages=point["history"], current_query=point["query"],
             max_tokens=budget, lightweight=True,
+            dropped_notice=dropped_notice,
         )
         return result.compressed_text, result.compression_ratio
 
@@ -99,6 +101,7 @@ async def compress_history(
         )
     result = await forge_cache[strategy].compress(
         messages=point["history"], current_query=point["query"], max_tokens=budget,
+        dropped_notice=dropped_notice,
     )
     return result.compressed_text, result.compression_ratio
 
@@ -114,6 +117,7 @@ async def evaluate_point(
     base_url: str,
     model: str,
     samples: int,
+    dropped_notice: bool = True,
 ) -> dict:
     """Compress once, then answer+judge `samples` times.
 
@@ -122,7 +126,8 @@ async def evaluate_point(
     measure is how much the *scoring* moves between identical runs.
     """
     context, ratio = await compress_history(
-        strategy, point, budget, forge_cache, api_key, base_url, model)
+        strategy, point, budget, forge_cache, api_key, base_url, model,
+        dropped_notice)
 
     total = max(len(point["points"]), 1)
     scores, answers = [], []
@@ -252,7 +257,19 @@ async def main() -> int:
     points = data["points"]
     if args.limit:
         points = points[:args.limit]
-    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+
+    # A strategy may be written "simple" or "simple-nodrop". The suffix runs the
+    # same compressor with the closing "what was left out" note suppressed, which
+    # is how the note's effect is measured: everything else has to stay identical.
+    specs = [s.strip() for s in args.strategies.split(",") if s.strip()]
+    strategies = specs
+    dropped_notice_for = {
+        name: not name.endswith("-nodrop") for name in specs
+    }
+    base_strategy_for = {
+        name: (name[: -len("-nodrop")] if name.endswith("-nodrop") else name)
+        for name in specs
+    }
 
     # ── Resume support ───────────────────────────────────────────────────────
     # Results are written after every point, so a batch can be stopped at any
@@ -316,9 +333,10 @@ async def main() -> int:
             if args.rebuild_every and index and index % args.rebuild_every == 0:
                 forge_cache.clear()
             row = await evaluate_point(
-                point, strategy, args.budget, forge_cache,
+                point, base_strategy_for[strategy], args.budget, forge_cache,
                 answerer, judge, args.api_key, args.base_url, args.model,
                 args.samples,
+                dropped_notice_for[strategy],
             )
             rows.append(row)
             write_out({**{s: results[s]["rows"] for s in results}, strategy: rows})

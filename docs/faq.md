@@ -83,6 +83,41 @@ earlier in the context identical; `truncate` only shortens the tail. If you
 want neither overshoot nor truncation, raise `max_tokens` so the newest message
 fits.
 
+## The model says "the answer is not in the context" when it is in the history.
+
+It probably is not in the *summary*. The model cannot tell the difference: it
+was handed a message list, so it assumes that list is the conversation.
+
+Every result therefore ends with a line saying how much was left out:
+
+```
+[compression note] 37 earlier messages (~12,480 tokens) are not included above.
+If the answer is not here, say what is missing rather than guessing.
+```
+
+Written in the language of your question, on by default, and reserved inside
+`max_tokens` so it never breaks the budget.
+
+What it is worth, measured on three datasets (same compressor, note on versus
+off, paired by question, significance grouped by conversation): nothing
+measurable where the history is cut to 4% of its size, +4 to +5 points overall
+on two private datasets, and **+10 to +12 points where 20–50% of the history
+survives** — the range where a summary still reads like a complete
+conversation. It did *not* measurably stop the model from guessing; on this
+data the model rarely guessed anyway. Figures and reproduction commands are in
+`benchmarks/README.md`.
+
+Turn it off with `dropped_notice=False` (CLI: `--no-dropped-notice`). The counts
+stay in the result either way:
+
+```python
+result.stats["dropped_messages"]  # 37
+result.stats["dropped_tokens"]    # 12480
+```
+
+A gap of `0` with `dropped_messages` present and `passthrough` set means the
+whole history really was in the prompt — nothing was hidden from the model.
+
 ## `simple` or `acs`?
 
 Ask whether your question and your answer share vocabulary.

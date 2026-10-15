@@ -323,6 +323,67 @@ The practical consequence: do not route automatically. Default to the free
 path, and switch on retrieval when you know your workload needs it — which is a
 judgement about your data that you can make and the library cannot.
 
+### Does telling the model what it missed help?
+
+The summary ends with a line saying how much history it left out
+(`dropped_notice`, on by default). The reasoning behind it was: a model handed
+a lossy summary assumes it is the whole conversation, so when the answer was
+simply never shown it will answer "not in the context" — or make something up.
+
+Half of that reasoning turned out to be wrong, and the half that survived is
+worth more than the half that did not.
+
+`qa_eval.py` runs the same strategy twice, with the note and without it
+(`simple` vs `simple-nodrop` — same compressor, one line appended, and the
+note's tokens reserved out of the budget rather than added on top). Points are
+compared in pairs, so a question's own difficulty cancels out, and the
+significance figures are grouped by conversation.
+
+| Dataset | Points | All | Note on − off, at a 20–50% compression ratio |
+|---|---|---|---|
+| LongMemEval (96 independent histories, ~100k tokens → 4000) | 96 | 11.5% vs 12.5% → −1.0pp (p=0.32) | n/a — every point is in this band, and the band is 4% |
+| hermes production (12 conversations) | 131 | 46.3% vs 40.9% → **+5.4pp** (clustered p=0.089) | **+10.4pp** (58 points, 19:8, clustered p=0.034) |
+| hermes chat logs (29 conversations) | 163 | 40.7% vs 36.7% → **+4.1pp** (clustered p=0.026) | **+11.6pp** (61 points, 22:11, clustered p=0.005) |
+
+Three things to take from this, in order of how much they should change your
+behaviour:
+
+1. **The note does not cost anything measurable.** On the dataset where it
+   cannot help (LongMemEval, where 96% of the history is dropped and the model
+   can see the context is a fragment) it is a wash: −1.0pp, p=0.32.
+2. **It helps when the summary looks complete.** Both private datasets give
+   ~+10pp in the 20–50% band, which is where a compressed history still reads
+   like a history. The band was noticed on the first dataset and then reproduced
+   on the second, which had not been run yet — that is the whole of the evidence
+   for it, and it is why the figure above is not presented as the headline.
+   Outside that band: no difference at a 50–80% ratio, and nothing when only 4%
+   of the history survives.
+3. **`stated_missing` does not move.** The model says "not in the context" about
+   as often with the note as without it (71.8% vs 68.7%, 76.7% vs 75.5%, 87.5%
+   vs 87.5%). The note did not teach the model to declare gaps. What changed is
+   the score, and the mechanism behind it is not established — the honest
+   reading is that the note changes how the model uses the material it has, not
+   how much it has. Do not quote a mechanism for this that was not measured.
+
+The original motivation — that the model invents answers when the context is
+incomplete — measurably does not happen on this data. Concrete answers with
+zero key points covered are 0.0–3.1% of points, with or without the note. It
+may still happen in your workload; it just is not what these three evaluations
+show.
+
+```bash
+# the A/B itself
+python benchmarks/qa_eval.py --set qa-set.json \
+    --strategies simple,simple-nodrop --out notice-ab.json
+
+# paired comparison, grouped by conversation
+python benchmarks/analyze_notice_ab.py notice-ab.json
+```
+
+`analyze_notice_ab.py` reports the score difference, how often the answer
+declares the information missing, how often a concrete answer covered none of
+the key points, and the same numbers per compression-ratio band.
+
 ## Regression checking
 
 That advantage is fragile: it holds only when the answer sits early in a long

@@ -17,6 +17,7 @@ from .types import (
     CompressionResult, InfoType, MIN_TOKENS_TO_COMPRESS, MIN_COMPRESSION_GAIN,
     split_recent_window, render_recent_blocks, validate_overflow_policy,
     CompressionPlan, plan_compression,
+    render_dropped_notice, DROPPED_NOTICE_RESERVE_TOKENS,
 )
 from .base import LLMProvider, BaseAnalyzer, BaseRetriever, BaseProcessor, BaseFormatter
 from .llm import OpenAIProvider, InstrumentedProvider, probe_llm
@@ -121,6 +122,7 @@ class ShenlunForge:
         lightweight: bool = False,
         recent_window: int = 0,
         budget_overflow: str = "keep",
+        dropped_notice: bool = True,
     ) -> CompressionResult:
         """
         Compress conversation context using the ACS 4-step pipeline.
@@ -150,6 +152,14 @@ class ShenlunForge:
                   you are metering cost or the target model's window; costs you
                   the tail of the most recent turn. Reported as
                   ``stats["recent_truncated"]``.
+            dropped_notice: Append a short note telling the model how much
+                earlier history is not in the summary, in the language of the
+                question. On by default. Without it the model cannot tell "the
+                answer is not there" apart from "I was never shown it". Set to
+                ``False`` for a summary with no extra line;
+                ``stats["dropped_messages"]`` and ``stats["dropped_tokens"]``
+                are still reported so you can log the gap yourself. Measured
+                effect and reproduction commands: ``benchmarks/README.md``.
 
         Returns:
             CompressionResult with compressed text and statistics.
@@ -174,6 +184,10 @@ class ShenlunForge:
         early_blocks, recent_blocks = split_recent_window(
             context_blocks, max_tokens, recent_window
         )
+
+        # Hold back a few tokens so the "what was left out" note appended at the
+        # end cannot push the result past max_tokens.
+        notice_reserve = DROPPED_NOTICE_RESERVE_TOKENS if dropped_notice else 0
 
         if lightweight:
             # ── Lightweight mode: no LLM calls ──────────────────────────
@@ -212,13 +226,17 @@ class ShenlunForge:
 
             # Step 4: Format (early blocks only — recent blocks bypass formatter)
             recent_tokens = sum(b.token_count for b in recent_blocks) if recent_blocks else 0
-            task_profile.token_budget = max(max_tokens - recent_tokens, max_tokens // 4)
+            task_profile.token_budget = max(
+                max_tokens - recent_tokens - notice_reserve, max_tokens // 4
+            )
             step_start = time.time()
             compressed_text = await self.formatter.format(compressed_blocks, task_profile)
 
             # Step 4b: Append the protected recent messages
             if recent_blocks:
-                remaining = max_tokens - self.llm.count_tokens(compressed_text)
+                remaining = (
+                    max_tokens - notice_reserve - self.llm.count_tokens(compressed_text)
+                )
                 appended, truncated = render_recent_blocks(
                     recent_blocks, remaining, budget_overflow
                 )
@@ -282,7 +300,9 @@ class ShenlunForge:
 
             # Step 3b: Reserve token budget for recent window blocks
             recent_tokens = sum(b.token_count for b in recent_blocks) if recent_blocks else 0
-            task_profile.token_budget = max(max_tokens - recent_tokens, max_tokens // 4)
+            task_profile.token_budget = max(
+                max_tokens - recent_tokens - notice_reserve, max_tokens // 4
+            )
 
             # Step 4: Format within token budget (early blocks only — recent bypass formatter)
             step_start = time.time()
@@ -290,7 +310,9 @@ class ShenlunForge:
 
             # Step 4b: Append the protected recent messages
             if recent_blocks:
-                remaining = max_tokens - self.llm.count_tokens(compressed_text)
+                remaining = (
+                    max_tokens - notice_reserve - self.llm.count_tokens(compressed_text)
+                )
                 appended, truncated = render_recent_blocks(
                     recent_blocks, remaining, budget_overflow
                 )
@@ -346,6 +368,39 @@ class ShenlunForge:
             ]
             passthrough = True
 
+        # ── Say what was left out ─────────────────────────────────────────
+        # A compressor that drops history silently leaves the model unable to
+        # tell "the answer is not there" apart from "I was never shown it".
+        # One line lets it tell the two apart (measured in benchmarks/README.md).
+        # Accounts for the formatter's own budget decisions, which is where most
+        # of the dropping happens.
+        if passthrough:
+            kept_indices = {b.msg_index for b in context_blocks}
+        else:
+            formatter_indices = getattr(self.formatter, "included_indices", None)
+            if formatter_indices is None:
+                # Third-party formatter: fall back to trusting the block list.
+                kept_indices = {i for b in compressed_blocks for i in b.original_indices}
+            else:
+                # The formatter reports what it actually wrote; the recent
+                # window is appended verbatim after it, so add those too.
+                kept_indices = set(formatter_indices) | {b.msg_index for b in recent_blocks}
+
+        dropped_blocks = [b for b in context_blocks if b.msg_index not in kept_indices]
+        dropped_messages = len(dropped_blocks)
+        dropped_tokens = sum(b.token_count for b in dropped_blocks)
+
+        if dropped_notice and not passthrough:
+            language_hint = current_query or (
+                messages[-1].get("content", "") if messages else ""
+            )
+            notice = render_dropped_notice(
+                dropped_messages, dropped_tokens, language_hint
+            )
+            if notice:
+                compressed_text += notice
+                compressed_tokens = self.llm.count_tokens(compressed_text)
+
         # Build result
         result = CompressionResult(
             compressed_text=compressed_text,
@@ -374,6 +429,10 @@ class ShenlunForge:
                 # Only ever True under budget_overflow="truncate": the newest
                 # message could not be kept whole.
                 "recent_truncated": recent_truncated,
+                # How much history the model is not seeing. Reported even when
+                # the notice is turned off, so callers can log the gap instead.
+                "dropped_messages": dropped_messages,
+                "dropped_tokens": dropped_tokens,
             },
             steps_log=steps_log if verbose else {},
         )

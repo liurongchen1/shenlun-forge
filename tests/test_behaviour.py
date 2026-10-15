@@ -19,6 +19,11 @@ def _make_history(n: int, prefix: str = "filler") -> list:
     ]
 
 
+def _without_notice(text: str) -> str:
+    """Drop the trailing "what was left out" note the compressor appends."""
+    return text.split("\n\n【压缩说明】")[0].split("\n\n[compression note]")[0]
+
+
 def test_version_is_read_from_a_single_source():
     # Regression: __version__ used to be hard-coded and drifted from the
     # published distribution version.
@@ -307,8 +312,11 @@ class TestBudgetOverflowPolicy:
             messages=messages, current_query="总结一下", max_tokens=500,
             budget_overflow="truncate")
 
-        assert cut.compressed_text.startswith(
-            kept.compressed_text[: len(cut.compressed_text) - 3])
+        # Compared without the closing note: under "truncate" the note is sized
+        # out of the budget, so only the body should match as a prefix.
+        kept_body = _without_notice(kept.compressed_text)
+        cut_body = _without_notice(cut.compressed_text)
+        assert cut_body.startswith(kept_body[: len(cut_body) - 3])
 
     def test_unknown_policy_is_rejected(self):
         forge = ShenlunForge.create(strategy="simple")
@@ -318,6 +326,102 @@ class TestBudgetOverflowPolicy:
                 current_query="x",
                 budget_overflow="typo",
             )
+
+
+class TestDroppedNotice:
+    """The summary has to say what it does not contain.
+
+    A model handed a lossy summary without being told it is lossy answers "that
+    is not in the context" — even when the answer was simply never shown. The
+    note costs one line and removes that failure mode.
+    """
+
+    @staticmethod
+    def _long_history(n: int = 20) -> list:
+        return [
+            {
+                "role": "user" if i % 2 else "assistant",
+                "content": f"第 {i} 条历史记录，包含若干需要记住的细节。" * 20,
+            }
+            for i in range(n)
+        ]
+
+    def test_notice_appears_and_counts_what_was_dropped(self):
+        forge = ShenlunForge.create(strategy="simple")
+        result = forge.compress_sync(
+            messages=self._long_history(),
+            current_query="总结一下这些历史",
+            max_tokens=400,
+        )
+
+        assert result.stats["dropped_messages"] > 0
+        assert "【压缩说明】" in result.compressed_text
+        assert f"{result.stats['dropped_messages']} 条" in result.compressed_text
+
+    def test_notice_language_follows_the_question(self):
+        forge = ShenlunForge.create(strategy="simple")
+        result = forge.compress_sync(
+            messages=self._long_history(),
+            current_query="What did we decide about the retry policy?",
+            max_tokens=400,
+        )
+
+        assert "[compression note]" in result.compressed_text
+        assert "【压缩说明】" not in result.compressed_text
+
+    def test_nothing_is_claimed_when_nothing_was_dropped(self):
+        forge = ShenlunForge.create(strategy="simple")
+        result = forge.compress_sync(
+            messages=_make_history(4), current_query="总结", max_tokens=4000,
+        )
+
+        assert result.stats["passthrough"] is True
+        assert result.stats["dropped_messages"] == 0
+        assert "压缩说明" not in result.compressed_text
+        assert "compression note" not in result.compressed_text
+
+    def test_opt_out_keeps_the_summary_clean_but_still_reports_the_gap(self):
+        forge = ShenlunForge.create(strategy="simple")
+        messages = self._long_history()
+        announced = forge.compress_sync(
+            messages=messages, current_query="总结一下", max_tokens=400)
+        silent = forge.compress_sync(
+            messages=messages, current_query="总结一下", max_tokens=400,
+            dropped_notice=False)
+
+        assert "压缩说明" not in silent.compressed_text
+        assert silent.stats["dropped_messages"] == announced.stats["dropped_messages"]
+        assert silent.stats["dropped_tokens"] > 0
+        assert silent.compressed_tokens < announced.compressed_tokens
+
+    def test_truncate_still_honours_the_budget_with_the_notice(self):
+        messages = self._long_history() + [
+            {"role": "assistant", "content": "最新一轮的完整回复内容 " * 400}
+        ]
+        forge = ShenlunForge.create(strategy="simple")
+        result = forge.compress_sync(
+            messages=messages, current_query="总结一下", max_tokens=500,
+            budget_overflow="truncate")
+
+        # The note is part of the output, so it has to fit inside the budget the
+        # caller asked for — not be appended on top of it.
+        assert result.compressed_tokens <= 510
+        assert "【压缩说明】" in result.compressed_text
+
+    def test_full_pipeline_also_says_what_is_missing(self):
+        # No API key, so ACS degrades to its rule-based path. The note is
+        # emitted by the compressor itself, so it must appear on both paths.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            forge = ShenlunForge.create(strategy="acs", api_key="")
+        result = forge.compress_sync(
+            messages=self._long_history(),
+            current_query="总结一下这些历史",
+            max_tokens=400,
+        )
+
+        assert result.stats["dropped_messages"] > 0
+        assert "【压缩说明】" in result.compressed_text
 
 
 class TestMaxTokensValidation:

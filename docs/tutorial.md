@@ -62,10 +62,13 @@ print(f"{result.original_tokens} → {result.compressed_tokens} token"
 print(result.compressed_text[:500])
 ```
 
-看两件事：
+看三件事：
 
 1. **保留的内容对不对**——`result.blocks` 里的每条都带 `original_indices`，能追回原文。
 2. **token 省了多少**——`compression_ratio` 越低压得越狠。
+3. **它交代了多大的缺口**——`result.stats["dropped_messages"]` 和
+   `stats["dropped_tokens"]` 是没进摘要的那部分历史。摘要末尾也会写一行把这件事
+   告诉模型（默认开启，中文问题给中文提示）。
 
 如果压出来比原文还长，说明这段对话本来就不该压，代码会直接原样返回并置
 `stats["passthrough"] = True`。

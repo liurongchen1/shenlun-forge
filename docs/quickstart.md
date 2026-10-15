@@ -139,8 +139,9 @@ with budget while a tight budget costs a large share of questions outright.
 | `stats["llm_calls"]` / `stats["llm_failures"]` | How many LLM requests were made and how many failed |
 | `stats["over_budget"]` | `True` means the result exceeded `max_tokens` (see below) |
 | `stats["recent_truncated"]` | `True` means the newest message was trimmed to fit |
+| `stats["dropped_messages"]` / `stats["dropped_tokens"]` | How much history is not in the summary (see below) |
 
-## Four things that surprise people
+## Five things that surprise people
 
 **`max_tokens` is a ceiling, not a target.** The rule-based strategy only keeps
 messages that relate to your query. If that is four messages, you get four
@@ -173,3 +174,19 @@ assert result.compressed_tokens <= 4000
 
 From the CLI: `--budget-overflow truncate`. Either way the result tells you
 which happened.
+
+**The summary says what it left out.** You do not have to guess how much history
+the model is missing, and neither does the model:
+
+```
+[compression note] 37 earlier messages (~12,480 tokens) are not included above.
+If the answer is not here, say what is missing rather than guessing.
+```
+
+This is on by default. It costs one line, is written in the language of your
+question, and is reserved inside `max_tokens` rather than appended on top of it.
+Without it, a model that never saw the answer has no way to know that — it
+assumes the summary *is* the conversation, and answers "not in the context" or
+simply makes something up. Turn it off with `dropped_notice=False` (CLI:
+`--no-dropped-notice`); `stats["dropped_messages"]` still tells you the size of
+the gap.

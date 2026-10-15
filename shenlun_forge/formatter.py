@@ -16,6 +16,11 @@ class ACSFormatter(BaseFormatter):
 
     def __init__(self, llm=None):
         self.llm = llm
+        # Original message indices that survived the budget in the last call.
+        # The compressor needs this to tell the model how much history was left
+        # out, and the formatter is the only component that knows which blocks
+        # actually fit.
+        self.included_indices: set[int] = set()
 
     async def format(
         self,
@@ -24,6 +29,7 @@ class ACSFormatter(BaseFormatter):
     ) -> str:
         """Format compressed blocks into final output within token budget."""
 
+        self.included_indices = set()
         if not blocks:
             return ""
 
@@ -41,6 +47,10 @@ class ACSFormatter(BaseFormatter):
             result = self._format_sequential(blocks, token_budget)
 
         return result
+
+    def _mark_used(self, block: CompressedBlock) -> None:
+        """Record that a block made it into the output."""
+        self.included_indices.update(block.original_indices or [])
 
     def _format_sequential(
         self,
@@ -64,9 +74,11 @@ class ACSFormatter(BaseFormatter):
                 if remaining > 20:  # At least 20 tokens worth
                     entry = self._truncate_to_budget(entry, remaining)
                     parts.append(entry)
+                    self._mark_used(block)
                 break
 
             parts.append(entry)
+            self._mark_used(block)
             used_tokens += entry_tokens
 
         return "\n".join(parts)
@@ -111,11 +123,13 @@ class ACSFormatter(BaseFormatter):
                     if remaining > 10:
                         entry = self._truncate_to_budget(entry, remaining)
                         parts.append(entry)
+                        self._mark_used(block)
                         used_tokens += remaining
                     budget_exhausted = True
                     break
 
                 parts.append(entry)
+                self._mark_used(block)
                 used_tokens += entry_tokens
 
             if budget_exhausted:
@@ -148,9 +162,11 @@ class ACSFormatter(BaseFormatter):
                 if remaining > 10:
                     entry = self._truncate_to_budget(entry, remaining)
                     parts.append(entry)
+                    self._mark_used(block)
                 break
 
             parts.append(entry)
+            self._mark_used(block)
             used_tokens += entry_tokens
 
         return "\n".join(parts)

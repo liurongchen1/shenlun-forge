@@ -167,15 +167,46 @@ result.stats["llm_calls"]       # 实际发起了几次 LLM 请求
 result.stats["llm_failures"]    # 其中失败几次
 result.stats["over_budget"]     # True 表示结果超出了 max_tokens
 result.stats["recent_truncated"]# True 表示最近的消息被裁剪过
+result.stats["dropped_messages"]# 有多少条历史没进摘要
+result.stats["dropped_tokens"]  # 这些被丢掉的历史大概多少 token
 ```
 
-三个刻意设计的行为： / Three deliberate behaviours:
+四个刻意设计的行为： / Four deliberate behaviours:
 
 - **`max_tokens` 是上限，不是目标**：只有四条消息和问题相关，就只保留四条，不会用无关
   内容把预算填满。
 - **压不动就原样返回**：省不到 5%，或历史不足 200 token，会原封不动返回输入。
 - **最后一轮优先**：最后一条消息自己就装不进预算时，默认整条保留（信息完整优先）并置
   `over_budget`。如果 `max_tokens` 对你是硬约束，传 `budget_overflow="truncate"`。
+- **它会告诉你它没装下什么**：摘要末尾跟一行“另有 N 条较早历史未包含在上文”。见下。
+
+### 摘要会自己交代缺口 / The summary says what is missing
+
+```
+…（摘要正文）
+
+【压缩说明】另有 37 条较早历史未包含在上文（约 12,480 tokens）。如果这里找不到答案，请说明缺口，不要臆测。
+```
+
+模型不知道压缩器丢了东西，它只知道你给了它一段历史：当答案正好在被丢掉的那部分里时，
+它会说“上下文里没有相关信息”，而它其实无法区分“没有”和“我没看到”。这一行把它从
+“读完了全部历史”纠正回“只读了其中一部分”。
+
+默认开启，语言跟随你的提问（中文问题给中文提示，英文问题给英文提示），占用的 token
+算在 `max_tokens` 里，不会偷偷把结果撑破预算。不需要就传 `dropped_notice=False`；
+无论开关，`stats["dropped_messages"]` 和 `stats["dropped_tokens"]` 都会照常上报，
+你可以自己决定怎么记这笔账。命令行是 `--no-dropped-notice`。
+
+实测（同一批点开/关对照、按对话聚类）：摘要还像一份完整历史（保留 20–50%）时，
+它值 +10pp 左右的回答质量；压到只剩 4% 时，它没有可测量的影响。它并没有让模型
+更多地说“缺失”，也没有显著减少编答案——机制没测出来，就不要替它编一个。
+
+A model handed a lossy summary does not know it is lossy, so it cannot tell
+"the answer is not there" apart from "I was never shown it". This line tells it
+which part of the conversation it never saw. On by default, written in the
+language of the question, sized inside your `max_tokens` budget. Turn it off
+with `dropped_notice=False` (`--no-dropped-notice` on the CLI); the gap is still
+reported in `stats` either way.
 
 ## 命令行 / CLI
 
@@ -256,6 +287,25 @@ costs about 60 ms more than keyword matching — negligible next to one model ca
 - **换检索器的影响超过所有调参**：预算、合并策略、最近窗口份额，实测全是噪声。
 - **自动选检索器不可行**，而且是结构性的：答案要么随机（无法预测，且"总是检索"
   就已最优），要么靠末尾（两种选择打平，没有收益可拿）。
+
+摘要末尾那句「另有 N 条较早历史未包含在上文」也单独测过（同一批点，开/关对照，
+按对话聚类做显著性检验）：
+
+| 数据 | 开 | 关 | 结论 |
+|---|---|---|---|
+| LongMemEval，96 条独立长历史 | 11.5% | 12.5% | 打平（p=0.32）——压掉 96% 时，模型本来就看得出来上下文是残片 |
+| 真实工作对话，131 点 / 12 个对话 | 46.3% | 40.9% | +5.4pp；**保留 20–50% 历史的那一档是 +10.4pp**（p=0.034） |
+| 聊天记录，163 点 / 29 个对话 | 40.7% | 36.7% | +4.1pp（p=0.026）；同样，20–50% 那一档 +11.6pp（p=0.005） |
+
+一句话：**摘要看起来像一份完整历史时，这句话有用；压得只剩下片段时，它没用。**
+另外要如实说，我原本以为它防幻觉，结果没测出来——两种情况下模型"答了但没答到点"
+的比例都是 0%–3% 左右。细节和复现命令见
+[`benchmarks/README.md`](benchmarks/README.md)。
+
+The same result in one sentence: the note pays for itself when the compressed
+history still reads like a history (a 20–50% ratio), and costs nothing
+measurable when it does not. Its original justification — that a model invents
+answers when the context is incomplete — did not survive measurement.
 
 By question type on LongMemEval (16k budget, n=16 each):
 

@@ -26,6 +26,10 @@ Quick Start:
     )
     print(result.compressed_text)
 
+The result ends with a one-line note saying how much history the summary left
+out, so the model knows it is reading part of the conversation rather than all
+of it. Disable with dropped_notice=False; the counts stay in result.stats.
+
 If this library helps you, a star on GitHub is the nicest way to say so:
 https://github.com/liurongchen1/shenlun-forge
 """

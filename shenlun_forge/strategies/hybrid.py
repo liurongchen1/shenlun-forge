@@ -22,6 +22,7 @@ from ..types import (
     ContextBlock, CompressedBlock, TaskProfile,
     CompressionResult, MIN_TOKENS_TO_COMPRESS, MIN_COMPRESSION_GAIN,
     split_recent_window, render_recent_blocks, validate_overflow_policy,
+    render_dropped_notice, DROPPED_NOTICE_RESERVE_TOKENS,
 )
 from ..base import LLMProvider
 from ..llm import OpenAIProvider, InstrumentedProvider, probe_llm
@@ -102,8 +103,9 @@ class HCSCompressor:
         verbose: bool = False,
         recent_window: int = 0,
         budget_overflow: str = "keep",
+        dropped_notice: bool = True,
     ) -> CompressionResult:
-        """Compress. See ShenlunForge.compress for ``budget_overflow``."""
+        """Compress. See ShenlunForge.compress for the argument semantics."""
         validate_overflow_policy(budget_overflow)
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
             raise ValueError(
@@ -136,6 +138,10 @@ class HCSCompressor:
             "has_code": code_token_count > 0,
         }
 
+        # Hold back a few tokens so the "what was left out" note appended at
+        # the end cannot push the result past max_tokens.
+        notice_reserve = DROPPED_NOTICE_RESERVE_TOKENS if dropped_notice else 0
+
         # ─── Step 2: Budget allocation ─────────────────────────────────
         # Reserve space for code (capped at code_budget_ratio of total)
         actual_code_tokens = min(
@@ -146,7 +152,7 @@ class HCSCompressor:
         # has to come out of the budget too — otherwise the result exceeds it.
         narrative_budget = max(
             self.min_narrative_budget,
-            max_tokens - actual_code_tokens - recent_tokens,
+            max_tokens - actual_code_tokens - recent_tokens - notice_reserve,
         )
 
         steps_log["budget"] = {
@@ -179,7 +185,9 @@ class HCSCompressor:
 
         # Append the protected recent messages, honouring the overflow policy.
         if recent_blocks:
-            remaining = max_tokens - self.llm.count_tokens(compressed_text)
+            remaining = (
+                max_tokens - notice_reserve - self.llm.count_tokens(compressed_text)
+            )
             appended, truncated = render_recent_blocks(
                 recent_blocks, remaining, budget_overflow
             )
@@ -192,7 +200,9 @@ class HCSCompressor:
         # ─── Step 5: Quality gate ──────────────────────────────────────
         savings_pct = (1 - compressed_tokens / max(original_tokens, 1)) * 100
         if savings_pct > self.fallback_savings_threshold:
-            simple_result = await self._fallback_simple(messages, current_query, max_tokens)
+            simple_result = await self._fallback_simple(
+                messages, current_query, max_tokens, dropped_notice
+            )
             steps_log["fallback"] = {
                 "triggered": True,
                 "reason": f"savings {savings_pct:.1f}% > {self.fallback_savings_threshold}%",
@@ -263,6 +273,32 @@ class HCSCompressor:
             ]
             passthrough = True
 
+        # ── Say what was left out ─────────────────────────────────────────
+        # The ACS summary is what covers the early messages; when it came back
+        # empty those messages are genuinely gone, and the model needs to know
+        # rather than answer as if it had read the whole conversation.
+        if passthrough:
+            kept_indices = {b.msg_index for b in blocks}
+        else:
+            kept_indices = {b.msg_index for b in recent_blocks}
+            if acs_text.strip():
+                kept_indices |= {b.msg_index for b in early_blocks}
+
+        dropped_blocks = [b for b in blocks if b.msg_index not in kept_indices]
+        dropped_messages = len(dropped_blocks)
+        dropped_tokens = sum(b.token_count for b in dropped_blocks)
+
+        if dropped_notice and not passthrough:
+            language_hint = current_query or (
+                messages[-1].get("content", "") if messages else ""
+            )
+            notice = render_dropped_notice(
+                dropped_messages, dropped_tokens, language_hint
+            )
+            if notice:
+                compressed_text += notice
+                compressed_tokens = self.llm.count_tokens(compressed_text)
+
         return CompressionResult(
             compressed_text=compressed_text,
             original_tokens=original_tokens,
@@ -295,6 +331,8 @@ class HCSCompressor:
                 "over_budget": (not passthrough)
                 and compressed_tokens > max_tokens * 1.02,
                 "recent_truncated": recent_truncated,
+                "dropped_messages": dropped_messages,
+                "dropped_tokens": dropped_tokens,
             },
             steps_log=steps_log if verbose else {},
         )
@@ -408,6 +446,7 @@ class HCSCompressor:
         messages: list[dict[str, str]],
         query: str,
         max_tokens: int,
+        dropped_notice: bool = True,
     ) -> CompressionResult:
         from .simple import SimpleStrategy
         simple = SimpleStrategy()
@@ -415,6 +454,7 @@ class HCSCompressor:
             messages=messages,
             current_query=query,
             max_tokens=max_tokens,
+            dropped_notice=dropped_notice,
         )
 
     def _parse_messages(self, messages: list[dict[str, str]]) -> list[ContextBlock]:

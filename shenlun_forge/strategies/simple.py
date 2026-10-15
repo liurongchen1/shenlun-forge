@@ -13,6 +13,7 @@ from ..types import (
     CompressionResult, InfoType, count_tokens,
     MIN_TOKENS_TO_COMPRESS, MIN_COMPRESSION_GAIN,
     split_recent_window, truncate_to_tokens, validate_overflow_policy,
+    render_dropped_notice, DROPPED_NOTICE_RESERVE_TOKENS,
 )
 
 
@@ -75,6 +76,7 @@ class SimpleStrategy:
         current_query: str = "",
         max_tokens: int = 4000,
         budget_overflow: str = "keep",
+        dropped_notice: bool = True,
         **kwargs,
     ) -> CompressionResult:
         """Compress using simple rules: dedup + priority + truncation.
@@ -89,6 +91,10 @@ class SimpleStrategy:
             budget_overflow: ``"keep"`` (default) keeps the recent messages
                 whole even if the result exceeds ``max_tokens``;
                 ``"truncate"`` trims them to stay within it.
+            dropped_notice: Append a line telling the model how much earlier
+                history was left out, in the language of the question. Without
+                it the model cannot tell "not there" apart from "never shown".
+                Measured effect: ``benchmarks/README.md``.
 
         Returns:
             CompressionResult with compressed text and statistics.
@@ -121,7 +127,8 @@ class SimpleStrategy:
             blocks, max_tokens, kwargs.get("recent_window") or 0
         )
         recent_tokens = sum(b.token_count for b in recent_blocks)
-        budget = max(max_tokens - recent_tokens, max_tokens // 4)
+        reserve = DROPPED_NOTICE_RESERVE_TOKENS if dropped_notice else 0
+        budget = max(max_tokens - recent_tokens - reserve, max_tokens // 4)
 
         # Step 1: Deduplicate
         seen = set()
@@ -209,7 +216,9 @@ class SimpleStrategy:
         for block in recent_blocks:
             content = block.content
             if budget_overflow == "truncate":
-                left = max_tokens - used_tokens
+                # Keep room for the closing note: under "truncate" the budget
+                # is a hard promise, and the note is part of the output.
+                left = max_tokens - reserve - used_tokens
                 if count_tokens(content) > left:
                     recent_truncated = True
                     content = truncate_to_tokens(content, left) if left > 20 else ""
@@ -256,6 +265,18 @@ class SimpleStrategy:
             used_tokens = original_tokens
             recent_truncated = False
 
+        # Tell the model what it is not seeing. Without this it treats the
+        # compressed text as the whole history and cannot tell "not there" apart
+        # from "never shown".
+        kept_indices = {i for b in result_blocks for i in b.original_indices}
+        dropped_messages = len(blocks) - len(kept_indices)
+        dropped_tokens = sum(b.token_count for b in blocks if b.msg_index not in kept_indices)
+        if dropped_notice:
+            notice = render_dropped_notice(dropped_messages, dropped_tokens, current_query)
+            if notice:
+                compressed_text += notice
+                used_tokens = count_tokens(compressed_text)
+
         return CompressionResult(
             compressed_text=compressed_text,
             original_tokens=original_tokens,
@@ -275,6 +296,8 @@ class SimpleStrategy:
                 "passthrough": passthrough,
                 "over_budget": (not passthrough) and used_tokens > max_tokens * 1.02,
                 "recent_truncated": recent_truncated,
+                "dropped_messages": dropped_messages,
+                "dropped_tokens": dropped_tokens,
             },
         )
 

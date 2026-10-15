@@ -131,6 +131,14 @@ def get_parser() -> argparse.ArgumentParser:
         "--output", "-o",
         help="Output file path (default: stdout)",
     )
+    compress_parser.add_argument(
+        "--no-dropped-notice",
+        action="store_true",
+        help=(
+            "Do not append the closing line that says how much earlier history "
+            "was left out. The stats still report dropped_messages/dropped_tokens."
+        ),
+    )
 
     # --- strategies ---
     subparsers.add_parser("strategies", help="List available compression strategies")
@@ -234,6 +242,7 @@ async def run_compress(args):
         max_tokens=args.max_tokens,
         verbose=args.verbose,
         budget_overflow=args.budget_overflow,
+        dropped_notice=not args.no_dropped_notice,
     )
 
     # Never let a degraded or no-op run look like a success.

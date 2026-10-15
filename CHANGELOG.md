@@ -7,6 +7,44 @@ distribution versions on PyPI.
 
 ### Added
 
+- **The summary now says what it does not contain.** Every result ends with a
+  line like
+  `[compression note] 37 earlier messages (~12,480 tokens) are not included above.`
+
+  The failure this removes is specific: a model handed a lossy summary has no
+  way to know it is lossy, so when the answer happens to sit in the dropped part
+  it answers "that is not in the context" — or invents something. One line
+  corrects "I read the whole conversation" to "I read part of it, and here is
+  where the gap is".
+
+  On by default, written in the language of the question, and sized inside
+  `max_tokens` rather than appended on top of it (the budget is reserved up
+  front, so `budget_overflow="truncate"` still holds as a hard limit). Turn it
+  off with `dropped_notice=False`, or `--no-dropped-notice` on the CLI.
+  `stats["dropped_messages"]` and `stats["dropped_tokens"]` are reported either
+  way, so the gap can be logged without putting a line in the prompt.
+
+  For the ACS pipeline the counts come from what the formatter actually wrote,
+  not from what it was handed — a block dropped for budget reasons is a block
+  the model cannot see.
+
+  Measured three times (`simple` vs the same compressor with the note
+  suppressed, paired by question, significance grouped by conversation):
+
+  | Dataset | Score | 20–50% compression band |
+  |---|---|---|
+  | LongMemEval, 96 independent ~100k-token histories | −1.0pp (p=0.32) | — |
+  | hermes production, 131 points / 12 conversations | +5.4pp (p=0.089) | +10.4pp (p=0.034) |
+  | hermes chat logs, 163 points / 29 conversations | +4.1pp (p=0.026) | +11.6pp (p=0.005) |
+
+  So: no measurable cost where it cannot help, and a gain where a compressed
+  history still reads like a complete one. The original motivation — that a
+  model invents answers when the context is incomplete — did **not** show up:
+  concrete answers covering no key points are 0.0–3.1% of points either way,
+  and the rate at which answers declare information missing barely moves. The
+  note changes how the model uses the material it has, not how much it has.
+  Full write-up and reproduction commands in `benchmarks/README.md`.
+
 - `tests/test_compression_regression.py` — behaviour regression on a fixed
   conversation that runs in CI on every commit and needs no credentials. It
   asserts the compressors still keep most of the key facts, stay inside their
