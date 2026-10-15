@@ -3,7 +3,13 @@
 Notable changes to this project. Version numbers follow the published
 distribution versions on PyPI.
 
-## Unreleased
+## 0.5.0 — 2026-10-15
+
+One behaviour change, and it is the point of the release: **user turns can now
+be protected from compression, decided per conversation.** Existing callers get
+a different result only when the user's turns carry most of the irreplaceable
+content — the case the release was built for. `protect_user_messages=False`
+restores the old behaviour exactly.
 
 ### Added
 
