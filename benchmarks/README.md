@@ -384,6 +384,49 @@ python benchmarks/analyze_notice_ab.py notice-ab.json
 declares the information missing, how often a concrete answer covered none of
 the key points, and the same numbers per compression-ratio band.
 
+### Scoring someone else's compressor
+
+If you already have a compressor, the useful question is not "is this library
+good" but "is it better than mine, on my conversations". A score only answers
+that when the only thing that differs between two numbers is the compressor —
+same points, same frozen answer key, same judge, same budget. So an external
+implementation can be entered as a strategy:
+
+```bash
+python benchmarks/qa_eval.py --set qa-set.json \
+    --strategies truncate,simple,embedding \
+    --external "ours=cd /path/to/project && OUR_DIR=$PWD npx tsx /path/to/adapter.ts"
+```
+
+The contract is deliberately small, so nothing has to be rewritten to be
+measured. The command receives this on stdin:
+
+```json
+{"messages": [{"role": "user", "content": "..."}], "query": "...", "maxTokens": 4000}
+```
+
+and prints this on stdout (`compressedText` / `compressionRatio` are accepted
+too, so a JavaScript implementation does not have to rename its fields):
+
+```json
+{"text": "<compressed context>", "ratio": 0.31}
+```
+
+- A non-zero exit, non-JSON output, or an empty `text` is a hard error. Scoring
+  an empty string as if it were a compressor would look like a very bad
+  compressor rather than a broken harness.
+- Each call is a fresh process. Start-up dominates for small histories — `npx
+  tsx` costs ~1.2s — which is fine for evaluation and is exactly why this is
+  not how you would wire a compressor into a running agent.
+- `benchmarks/external_adapter_example.ts` is a working template for a
+  TypeScript project. It imports the *deployed* module from a path you give it
+  rather than a copy, so the thing being scored cannot drift away from the
+  thing that is running.
+
+Two rules keep the comparison worth quoting: run every strategy over the same
+points, and never tune one implementation against a set you then evaluate the
+other on.
+
 ## Regression checking
 
 That advantage is fragile: it holds only when the answer sits early in a long

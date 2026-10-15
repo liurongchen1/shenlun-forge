@@ -77,8 +77,11 @@ async def compress_history(
     base_url: str,
     model: str,
     dropped_notice: bool = True,
+    external_cmd: Optional[str] = None,
 ) -> tuple:
     """Return (context_text, compression_ratio) for one strategy."""
+    if external_cmd:
+        return await compress_external(external_cmd, point, budget)
     if strategy == "truncate":
         return truncate_history(point["history"], budget), 1.0
     if strategy == "none":
@@ -106,6 +109,50 @@ async def compress_history(
     return result.compressed_text, result.compression_ratio
 
 
+async def compress_external(cmd: str, point: dict, budget: int) -> tuple:
+    """Run someone else's compressor as a subprocess and use its output.
+
+    The contract is deliberately tiny — JSON in on stdin, JSON out on stdout —
+    so that any implementation can be measured on the same points, against the
+    same frozen answer key, with the same judge. That is the whole point: a
+    score only means something when the only thing that differs between two
+    numbers is the compressor.
+
+    stdin:  {"messages": [{"role": ..., "content": ...}], "query": ..., "maxTokens": N}
+    stdout: {"text": "...", "ratio": 0.31}
+    """
+    payload = json.dumps({
+        "messages": point["history"],
+        "query": point["query"],
+        "maxTokens": budget,
+    }).encode()
+
+    process = await asyncio.create_subprocess_shell(
+        cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate(payload)
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"external compressor failed ({process.returncode}): "
+            f"{stderr.decode(errors='replace')[:500]}"
+        )
+    try:
+        data = json.loads(stdout.decode())
+    except json.JSONDecodeError:
+        raise RuntimeError(
+            "external compressor did not print JSON on stdout: "
+            f"{stdout.decode(errors='replace')[:200]!r}"
+        )
+    text = data.get("text") or data.get("compressedText") or ""
+    if not text:
+        raise RuntimeError("external compressor returned no text")
+    ratio = data.get("ratio") or data.get("compressionRatio") or 1.0
+    return text, float(ratio)
+
+
 async def evaluate_point(
     point: dict,
     strategy: str,
@@ -118,6 +165,7 @@ async def evaluate_point(
     model: str,
     samples: int,
     dropped_notice: bool = True,
+    external_cmd: Optional[str] = None,
 ) -> dict:
     """Compress once, then answer+judge `samples` times.
 
@@ -127,7 +175,7 @@ async def evaluate_point(
     """
     context, ratio = await compress_history(
         strategy, point, budget, forge_cache, api_key, base_url, model,
-        dropped_notice)
+        dropped_notice, external_cmd)
 
     total = max(len(point["points"]), 1)
     scores, answers = [], []
@@ -248,6 +296,12 @@ async def main() -> int:
                         default=os.getenv("DEEPSEEK_API_KEY") or os.getenv("SHENLUN_FORGE_API_KEY"))
     parser.add_argument("--base-url", default="https://api.deepseek.com/v1")
     parser.add_argument("--model", default="deepseek-chat")
+    parser.add_argument("--external", action="append", default=[], metavar="NAME=COMMAND",
+                        help="Score someone else's compressor as a strategy. The command "
+                             "receives {messages, query, maxTokens} as JSON on stdin and "
+                             "must print {\"text\": ..., \"ratio\": ...} on stdout. Repeat "
+                             "for several. This is how a comparison stays honest: same "
+                             "points, same frozen answer key, same judge, one variable.")
     args = parser.parse_args()
 
     if not args.api_key:
@@ -270,6 +324,19 @@ async def main() -> int:
         name: (name[: -len("-nodrop")] if name.endswith("-nodrop") else name)
         for name in specs
     }
+
+    external_for: dict = {}
+    for spec in args.external:
+        if "=" not in spec:
+            parser.error(f"--external expects NAME=COMMAND, got {spec!r}")
+        name, command = spec.split("=", 1)
+        name = name.strip()
+        if name in base_strategy_for:
+            parser.error(f"--external name {name!r} collides with --strategies")
+        external_for[name] = command.strip()
+        base_strategy_for[name] = name
+        dropped_notice_for[name] = True
+    strategies = specs + [name for name in external_for if name not in specs]
 
     # ── Resume support ───────────────────────────────────────────────────────
     # Results are written after every point, so a batch can be stopped at any
@@ -337,6 +404,7 @@ async def main() -> int:
                 answerer, judge, args.api_key, args.base_url, args.model,
                 args.samples,
                 dropped_notice_for[strategy],
+                external_for.get(strategy),
             )
             rows.append(row)
             write_out({**{s: results[s]["rows"] for s in results}, strategy: rows})

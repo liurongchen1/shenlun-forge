@@ -3,6 +3,22 @@
 Notable changes to this project. Version numbers follow the published
 distribution versions on PyPI.
 
+## Unreleased
+
+### Added
+
+- **`qa_eval.py --external NAME=COMMAND`** — enter any other compressor into the
+  same evaluation: same points, same frozen answer key, same judge, same
+  budget. The command reads `{messages, query, maxTokens}` as JSON on stdin and
+  prints `{text, ratio}`; a non-zero exit, non-JSON stdout, or empty text is a
+  hard error rather than a silent zero.
+
+  This is the comparison that is actually worth quoting. Two compressors scored
+  on different conversations, with different answer keys, at different budgets,
+  produce two numbers that cannot be subtracted from each other. Also in
+  `benchmarks/external_adapter_example.ts`, a template for a TypeScript project
+  that imports the *deployed* module rather than a copy.
+
 ## 0.4.0 — 2026-10-15
 
 ### Added
