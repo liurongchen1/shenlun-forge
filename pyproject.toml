@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "shenlun-forge"
 dynamic = ["version"]
-description = "Task-driven context compression for LLM agents with analytical compression strategy"
+description = "Context compression for LLM agents that you can measure on your own conversations"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
