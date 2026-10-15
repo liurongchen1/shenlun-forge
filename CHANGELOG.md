@@ -8,7 +8,7 @@ distribution versions on PyPI.
 ### Added
 
 - **`protect_user_messages`** on `compress()` / `compress_sync()` — rank user
-  turns ahead of the rest and never cut one in half. **Off by default.**
+  turns ahead of the rest and never cut one in half. Default `"auto"`.
 
   Found by replaying 666 messages from six real production agent conversations
   turn by turn (`benchmarks/replay_curve.py`): the gap against the harness this
@@ -19,11 +19,18 @@ distribution versions on PyPI.
   ("the goal is X", "do not touch Y"), so ranking it by relevance to the current
   question drops exactly the ones that matter most.
 
-  Off by default because the rule is not universal: in a question-and-answer
-  history the user turns *are* the questions and the answers live in the
-  assistant turns. Turning it on there cost key-fact retention on the bundled
-  development conversation (84% → 72%, or 12% at a stronger weight). Use it
-  when your user turns carry requirements.
+  The rule is not universal, and what separates the two cases is not whether the
+  user is asking or instructing — it is where the hard information sits, which
+  is visible before anything is compressed. `"auto"` measures that share and
+  protects only when the user's turns carry it. Across eight conversations, the
+  four where user turns held 46–72% of the hard information gained 0 to 8
+  points; the four at 0–14% were unchanged or, in one case, 14 points worse
+  when forced on. `stats["user_protection"]` reports what was decided.
+
+- **`shenlun_forge.facts`** — extraction of hard information: paths, URLs, IPs,
+  ports, command lines, filenames, numbers, config literals, constants. The
+  parts of a conversation that cannot be paraphrased. Used by the `"auto"`
+  decision above and by the replay metric below, so the two cannot drift apart.
 
 - **`benchmarks/replay_curve.py`** and **`benchmarks/replay_regression.py`** —
   replay a whole conversation the way a live agent compresses it (compress the

@@ -32,7 +32,7 @@ MESSAGES = [
 def test_hard_information_is_extracted_by_category():
     facts = replay.extract_facts(MESSAGES)
     assert "/srv/api/monitor.py" in facts
-    assert facts["/srv/api/monitor.py"]["category"] == "路径"
+    assert facts["/srv/api/monitor.py"]["category"] == "path"
     assert ":8643" in facts
     assert "127.0.0.1" in facts
     assert "500 MB" in facts

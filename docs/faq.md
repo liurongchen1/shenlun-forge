@@ -120,28 +120,29 @@ whole history really was in the prompt — nothing was hidden from the model.
 
 ## Should I turn on `protect_user_messages`?
 
-It depends on what your user turns are, and the difference is measurable rather
-than a matter of taste.
+You usually do not have to — the default is `"auto"`, which decides per
+conversation and reports the decision in `stats["user_protection"]`.
 
-**On** when user turns carry *requirements* — "build X", "do not touch Y", "we
-ship Friday", a port, a path, a constraint. Those are not content competing for
-relevance with everything else; the rest of the conversation is *about* them.
-Ranking them by similarity to the current question drops exactly the ones the
-question does not mention, which are often the ones that still bind.
+The question it answers is not "is the user asking or instructing", which turns
+out not to separate the two cases. It is **where the hard information sits**:
+paths, ports, command lines, config literals. When most of it is in the user's
+turns, ranking them by similarity to the current question drops exactly the
+constraints the question does not happen to mention, so they are ranked first
+and never cut in half. When it is in the assistant's turns, promoting the
+user's crowds out the content that matters and costs up to 14 points.
 
-**Off** (the default) when user turns are *questions*. In a question-and-answer
-history the answers live in the assistant turns, so promoting the questions
-costs more than it saves: on the conversation bundled with this repo, turning
-it on dropped key-fact retention from 84% to 72%.
-
-The numbers behind it come from replaying 666 messages of six real agent
-sessions turn by turn — see "Replaying a whole conversation" in
+Measured across eight conversations (666 real messages plus the bundled
+development conversation): the four where user turns held 46–72% of the hard
+information gained 0 to 8 points; the four at 0–14% were unchanged or, in one
+case, 14 points worse. See "Replaying a whole conversation" in
 `benchmarks/README.md`.
+
+Overrule it when you know your workload better than it does:
 
 ```python
 result = forge.compress_sync(
     messages=history, current_query=query, max_tokens=4000,
-    protect_user_messages=True,     # user turns are constraints here
+    protect_user_messages=True,   # or False
 )
 ```
 

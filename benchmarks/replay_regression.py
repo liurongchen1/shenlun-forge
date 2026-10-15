@@ -34,71 +34,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE_PATH = ROOT / "benchmarks" / "replay-baseline.json"
 
+sys.path.insert(0, str(ROOT))
 
-# ── What counts as hard information ────────────────────────────────────────
-# Mirrors the extraction rules a TypeScript harness report uses, so the two
-# scores mean the same thing. Anything that survives paraphrase is excluded on
-# purpose: this metric is about literals, not about meaning.
-
-_STOP_CONSTANTS = {
-    "HTTPS", "HTTP", "TODO", "README", "JSON", "HTML", "CSS", "VPN", "SSH",
-    "PPTX", "API", "URL", "APP", "MBTI", "CPU", "DNS", "SSL", "TLS", "SQL",
-    "UUID", "EXAMPLES", "WARNING", "ERROR", "DEBUG", "OPTIONS", "PATCH",
-    "DELETE", "POST", "HEAD", "GET", "PUT",
-}
-
-_COMMANDS = re.compile(
-    r"^\s*(?:ssh|ssh-keygen|scp|rsync|pm2|npm|npx|yarn|pnpm|systemctl|nginx|docker|"
-    r"docker-compose|psql|curl|curl\.exe|wget|grep|rg|sed|awk|chmod|chown|sudo|cd|"
-    r"ls|cat|vim|nano|kubectl|git|python3?|node|brew|apt|apt-get|yum|tar|unzip|kill|"
-    r"tail|head|find|xargs|openssl|netstat|ipconfig|certbot|ufw|export|Get-[A-Za-z]+|"
-    r"Set-[A-Za-z]+|New-[A-Za-z]+|Add-[A-Za-z]+|Test-[A-Za-z]+)\b[^\n]*",
-    re.MULTILINE,
-)
-
-_FILE_EXTENSIONS = (
-    "ts|tsx|js|jsx|mjs|json|md|conf|sql|yml|yaml|env|db|py|sh|ps1|bat|html|css|"
-    "png|jpg|jpeg|zip|log|txt|prisma|toml|ini|pem|key"
-)
-
-_CATEGORIES = (
-    ("路径", re.compile(r"(?:[A-Za-z]:\\[^\s\"'`,;，。)]+|/(?:[\w.@%+-]+/)+[\w.@%+-]+)"), None, 0),
-    ("URL", re.compile(r"https?://[^\s\"'）)】,、，。]+"), None, 0),
-    ("IP", re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), None, 0),
-    ("端口", re.compile(r"(?::\d{2,5}\b)|(?:端口\s*\d{2,5})"), None, 0),
-    ("常量名", re.compile(r"\b[A-Z][A-Z0-9_]{4,}\b"),
-     lambda t: t not in _STOP_CONSTANTS, 0),
-    ("命令行", _COMMANDS, None, 0),
-    ("文件名", re.compile(rf"\b[\w.-]+\.(?:{_FILE_EXTENSIONS})\b", re.IGNORECASE), None, 0),
-    ("数值", re.compile(r"\b\d+(?:\.\d+)?\s*(?:%|MB|GB|KB|TB|ms|分钟|小时|天|元|万|亿|次|条|张|页)\b"), None, 0),
-    ("配置字面值", re.compile(r"[`\"“'【]?([A-Za-z0-9_.\/\\:@#%-]{3,60})[`\"”'】]?"),
-     lambda t: bool(re.search(r"[./\\:@#_-]", t)) and bool(re.search(r"[A-Za-z]", t)) and len(t) >= 4, 1),
-)
+# The extraction rules live in the library, not here: "auto" user protection is
+# decided by where the hard information sits, and a metric that disagreed with
+# that decision would be measuring a conversation the library never saw.
+from shenlun_forge.facts import extract_facts  # noqa: E402
 
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
-
-
-def extract_facts(messages: list) -> dict:
-    """Every hard fact, mapped to where it first appeared."""
-    facts: dict[str, dict] = {}
-    for index, message in enumerate(messages):
-        content = message.get("content") or ""
-        for name, pattern, keep, group in _CATEGORIES:
-            for hit in pattern.finditer(content):
-                value = _norm(hit.group(group) or "")
-                if len(value) < 3:
-                    continue
-                if keep is not None and not keep(value):
-                    continue
-                if value not in facts:
-                    facts[value] = {
-                        "category": name,
-                        "msgIndex": index,
-                        "role": message.get("role"),
-                    }
-    return facts
 
 
 def _facts_upto(rows: list, upto_id: int, include_current: bool) -> tuple[dict, int]:
@@ -125,7 +70,7 @@ def score_series(rows: list, series: list) -> list[dict]:
         # "Early" means the first 30% of everything said so far: the part that
         # has had the most chances to be dropped.
         early_count = max(1, math.floor(prefix_len * 0.3))
-        early = [v for v, meta in facts.items() if meta["msgIndex"] < early_count]
+        early = [v for v, meta in facts.items() if meta["index"] < early_count]
         early_lost = [v for v in early if v not in visible]
         per_turn.append({
             "turn": item["turn"],

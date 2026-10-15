@@ -62,7 +62,7 @@ def replay(
     recent: int,
     label: str,
     matched_budgets: list | None = None,
-    protect_user_messages: bool = False,
+    protect_user_messages: bool | str = "auto",
 ):
     series = []
     history: list[dict[str, str]] = []
@@ -126,9 +126,13 @@ def main() -> int:
     parser.add_argument("--match-label", default=None,
                         help="read <label>-sim-<id>.json and give this run the same "
                              "context size the other implementation sent, turn by turn")
-    parser.add_argument("--protect-user", action="store_true",
+    parser.add_argument("--protect-user", dest="protect_user",
+                        action="store_true", default="auto",
                         help="rank user turns ahead of everything else (see "
                              "SimpleStrategy.protect_user_messages)")
+    parser.add_argument("--no-protect-user", dest="protect_user",
+                        action="store_false",
+                        help="never protect user turns, whatever the heuristic says")
     args = parser.parse_args()
 
     forge = ShenlunForge.create(strategy=args.strategy)

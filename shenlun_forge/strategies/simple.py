@@ -15,6 +15,7 @@ from ..types import (
     split_recent_window, truncate_to_tokens, validate_overflow_policy,
     render_dropped_notice, DROPPED_NOTICE_RESERVE_TOKENS,
 )
+from ..facts import user_fact_share
 
 
 # A block that shares vocabulary with the query is worth much more than one
@@ -31,13 +32,21 @@ _QUERY_MATCH_BONUS = 0.5
 # them like everything else lost 38 points more of their hard facts on 666 real
 # messages from six production conversations.
 #
-# It is not a universal rule, which is why it is not on by default. In a
-# question-and-answer history the user turns *are* the questions, and the answers
-# live in the assistant turns; promoting them there costs more than it saves
-# (measured: key-fact retention on the bundled development conversation fell
-# from 84% to 12% at a strong weight, and 72% at a weak one — below the old
-# behaviour either way). Turn it on when the user turns carry requirements.
+# It is not a universal rule. In a history where the answers live in the
+# assistant's turns, promoting the user's costs more than it saves (measured:
+# key-fact retention on the bundled development conversation fell from 84% to
+# 12% at a strong weight, 72% at a weak one). Hence "auto" — see below — rather
+# than a fixed answer.
 _USER_MESSAGE_BONUS = 0.35
+
+# ``"auto"`` decides by asking where the irreplaceable content actually is:
+# when most of the hard information (paths, ports, commands, config literals)
+# sits in user turns, protecting them pays; when it sits in assistant turns,
+# promoting the user's crowds it out. Measured across eight conversations, the
+# second group lost up to 14 points for the trouble. The threshold sits in the
+# gap between the two groups (0-14% versus 46-72%), which is also the honest
+# weakness of this rule: nothing observed yet falls in between.
+_AUTO_USER_PROTECTION_SHARE = 0.30
 
 
 class SimpleStrategy:
@@ -93,7 +102,7 @@ class SimpleStrategy:
         max_tokens: int = 4000,
         budget_overflow: str = "keep",
         dropped_notice: bool = True,
-        protect_user_messages: bool = False,
+        protect_user_messages: bool | str = "auto",
         **kwargs,
     ) -> CompressionResult:
         """Compress using simple rules: dedup + priority + truncation.
@@ -118,9 +127,14 @@ class SimpleStrategy:
                 those are constraints the rest of the history depends on, and
                 dropping the ones the current question does not happen to
                 mention changes the task rather than shortening the context.
-                Default ``False``: in a question-and-answer history the user
-                turns are the questions and the answers live in the assistant
-                turns, where this costs more than it saves.
+
+                - ``"auto"`` (default): decide from where the hard information
+                  sits. Protecting user turns pays when they carry most of the
+                  paths, ports, commands and config literals; when that content
+                  is in the assistant's turns instead, promoting the user's
+                  crowds it out.
+                - ``True`` / ``False``: force it. Useful when you know your
+                  workload, and when testing.
 
         Returns:
             CompressionResult with compressed text and statistics.
@@ -146,6 +160,16 @@ class SimpleStrategy:
             ))
 
         original_tokens = sum(b.token_count for b in blocks)
+
+        protect_user = protect_user_messages
+        if protect_user not in (True, False):
+            if protect_user != "auto":
+                raise ValueError(
+                    "protect_user_messages must be True, False or 'auto', "
+                    f"got {protect_user_messages!r}"
+                )
+            share = user_fact_share(blocks)
+            protect_user = share is not None and share >= _AUTO_USER_PROTECTION_SHARE
 
         # Step 0: Protect the most recent messages — they are never dropped or
         # truncated, only budgeted for (see split_recent_window).
@@ -182,7 +206,7 @@ class SimpleStrategy:
             shares_query_terms = bool(query_terms and (self._terms(block.content) & query_terms))
             if shares_query_terms:
                 score += _QUERY_MATCH_BONUS
-            if protect_user_messages and block.role == "user":
+            if protect_user and block.role == "user":
                 score += _USER_MESSAGE_BONUS
             scored.append((score, block, shares_query_terms))
         scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -210,7 +234,7 @@ class SimpleStrategy:
                         compression_ratio=1.0,
                     ))
                     used_tokens += block_tokens
-                elif protect_user_messages and block.role == "user":
+                elif protect_user and block.role == "user":
                     # Half a constraint is worse than none. Skip this one and
                     # let the budget go to blocks that do fit.
                     continue
@@ -330,6 +354,9 @@ class SimpleStrategy:
                 "recent_truncated": recent_truncated,
                 "dropped_messages": dropped_messages,
                 "dropped_tokens": dropped_tokens,
+                # What "auto" decided, so a surprising result can be explained
+                # without re-running it.
+                "user_protection": protect_user,
             },
         )
 

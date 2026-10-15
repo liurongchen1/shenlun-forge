@@ -432,8 +432,9 @@ On 666 messages from six real production conversations, replaying end to end:
 | | mean hard-information loss |
 |---|---|
 | the harness (verbatim tail + incremental summary) | **9.8%** |
-| this library, same context size, relevance ranking | 14.8% |
+| this library, same context size, relevance ranking only | 14.8% |
 | this library with `protect_user_messages=True` | **12.0%** |
+| this library with the default, `protect_user_messages="auto"` | **12.0%** |
 
 The gap was not uniform. Splitting it out by role showed it was almost entirely
 in **user turns**: at turn 88 of the longest conversation, 56.6% of the user
@@ -445,13 +446,26 @@ library ranked them by relevance like everything else, so an early "the goal is
 X" that the current question happens not to mention was exactly the thing that
 got dropped.
 
-That is what `protect_user_messages` adds, and it is **off by default** because
-the rule is not universal: in a question-and-answer history the user turns *are*
-the questions and the answers live in the assistant turns, so promoting them
-costs more than it saves. Measured on the bundled development conversation,
-turning it on dropped key-fact retention from 84% to 72% (and to 12% at a
-stronger weight, which is why the weight is what it is). Turn it on when your
-user turns carry requirements.
+That is what `protect_user_messages` adds — and the rule is *not* universal, so
+it is not a fixed yes. On the bundled development conversation the user turns
+look like requirements too ("the goal is X", "do this next") but the
+irreplaceable content is in the assistant's turns, and forcing protection on
+there dropped hard-information loss from 34.8% to **49.0%**, and key-fact
+retention from 84% to 72%.
+
+What separates the two cases is not whether the user is asking or instructing —
+it is **where the hard information sits**, which is visible before compressing
+anything. Across the eight conversations measured:
+
+| user share of hard information | conversations | effect of protecting |
+|---|---|---|
+| 46–72% | 4 | −8.2pp, −5.0pp, −3.8pp, 0 |
+| 0–14% | 4 | 0, 0, 0, **+14.2pp worse** |
+
+The gap between 14% and 46% is where the default threshold sits, and that gap is
+also the honest weakness of the rule: nothing measured so far lands inside it.
+`stats["user_protection"]` reports what was decided, so a surprising result can
+be explained without re-running it.
 
 ### Scoring someone else's compressor
 
