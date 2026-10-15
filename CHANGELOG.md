@@ -3,7 +3,7 @@
 Notable changes to this project. Version numbers follow the published
 distribution versions on PyPI.
 
-## Unreleased
+## 0.4.0 — 2026-10-15
 
 ### Added
 
